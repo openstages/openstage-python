@@ -42,9 +42,6 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 packages = [{ include = "openstage" }]
 
-[tool.poetry.build]
-script = "build.py"
-
 [tool.mypy]
 python_version = "3.11"
 strict = true

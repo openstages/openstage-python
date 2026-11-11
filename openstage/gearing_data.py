@@ -2,8 +2,8 @@
 
 The JSON files in ``data/`` are package data. They are updated with the
 library when new cassettes and chainring sets appear. After editing
-``front_rings.json`` or ``cassettes.json``, run ``python build.py`` to rebuild
-``preset_index.json``.
+``front_rings.json`` or ``cassettes.json``, run
+``python scripts/update_gearing_data.py`` to rebuild ``preset_index.json``.
 """
 
 from __future__ import annotations

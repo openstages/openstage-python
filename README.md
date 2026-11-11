@@ -128,11 +128,13 @@ Nothing is written during discovery, connection, querying or telemetry.
 .venv/bin/mypy openstage
 ```
 
-The drivetrain preset index is generated from the bundled tables:
+The drivetrain cassette table and preset index are regenerated together:
 
 ```sh
-python build.py
+python scripts/update_gearing_data.py
 ```
+
+`preset_index.json` is committed, so packaging needs no generation step.
 
 ## License
 

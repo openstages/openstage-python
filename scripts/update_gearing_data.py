@@ -8,20 +8,27 @@ Usage::
 URL in this script. The bundled ``cassettes.json`` is rewritten in display
 order (cog count, manufacturer, largest cog, smallest cog) and
 ``preset_index.json`` is regenerated from it.
+
+The index is generated here rather than at build time, so the distribution
+stays a pure Python wheel. The codec is loaded straight from its file because
+the package pulls in BLE and UI dependencies this script does not need.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "openstage" / "data"
+PDU_PATH = ROOT / "openstage" / "pdu.py"
 SOURCE_URL = (
     "https://raw.githubusercontent.com/dirkelko/Gear-Calculator-UI5/"
     "refs/heads/master/webapp/model/Gears.json"
@@ -106,6 +113,76 @@ def _read(source: str) -> dict[str, Any]:
     return json.loads(Path(source).read_text(encoding="utf-8"))
 
 
+def _load_pdu() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("openstage_pdu_update", PDU_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {PDU_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+def _payload_labels(
+    pdu: ModuleType, fronts: list[dict[str, Any]], cassettes: list[dict[str, Any]]
+) -> dict[str, tuple[str, list[str]]]:
+    """Map each map payload (hex) to its front ring and cassette names.
+
+    A payload can come from several cassette names when two brands ship the
+    same tooth sequence, so every name is kept.
+    """
+
+    labels: dict[str, tuple[str, list[str]]] = {}
+    for front in fronts:
+        front_bytes = bytes(pdu.sorted_front_gears(front["gears"]))
+        for cassette in cassettes:
+            payload = front_bytes + bytes(
+                pdu.sorted_cassette_gears(cassette["gears"])
+            )
+            front_name, cassette_names = labels.setdefault(
+                payload.hex(), (front["name"], [])
+            )
+            if cassette["name"] not in cassette_names:
+                cassette_names.append(cassette["name"])
+    return labels
+
+
+def _render(
+    index: dict[str, list[str]],
+    labels: dict[str, tuple[str, list[str]]],
+) -> str:
+    """Render the index as JSON with a ``//`` comment naming each payload."""
+
+    items = sorted(index.items())
+    lines = ["{"]
+    for key_position, (key, values) in enumerate(items):
+        lines.append(f"    {json.dumps(key)}: [")
+        for value_position, value in enumerate(values):
+            comma = "," if value_position + 1 < len(values) else ""
+            front_name, cassette_names = labels[value]
+            comment = f"{front_name} : {'; '.join(cassette_names)}"
+            lines.append(f"        {json.dumps(value)}{comma}  // {comment}")
+        lines.append("    ]" + ("," if key_position + 1 < len(items) else ""))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _preset_index_text() -> str:
+    """Rebuild ``preset_index.json`` from the bundled drivetrain tables."""
+
+    pdu = _load_pdu()
+    fronts = json.loads((DATA / "front_rings.json").read_text(encoding="utf-8"))
+    cassettes = json.loads((DATA / "cassettes.json").read_text(encoding="utf-8"))
+    index = pdu.build_preset_index(
+        (tuple(item["gears"]) for item in fronts),
+        (tuple(item["gears"]) for item in cassettes),
+    )
+    return _render(index, _payload_labels(pdu, fronts, cassettes))
+
+
 def main(argv: list[str]) -> None:
     source = argv[1] if len(argv) > 1 else SOURCE_URL
     records = _records(_read(source))
@@ -113,10 +190,9 @@ def main(argv: list[str]) -> None:
         json.dumps(records, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    sys.path.insert(0, str(ROOT))
-    from build import main as build_index
-
-    build_index()
+    (DATA / "preset_index.json").write_text(
+        _preset_index_text(), encoding="utf-8"
+    )
     print(f"wrote {len(records)} cassettes and rebuilt preset_index.json")
 
 

@@ -20,6 +20,13 @@ def _script() -> ModuleType:
     return module
 
 
+def test_preset_index_matches_script_output() -> None:
+    data = SCRIPT.parents[1] / "openstage" / "data"
+    assert _script()._preset_index_text() == (
+        data / "preset_index.json"
+    ).read_text(encoding="utf-8")
+
+
 def test_records_are_annotated_sorted_and_deduplicated() -> None:
     records = _script()._records(
         {
