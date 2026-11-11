@@ -1,0 +1,86 @@
+{
+ "meta": {
+  "kind": "queries",
+  "device_name": "Stages Bike 0071",
+  "address": "EF:9E:0F:7C:9A:51",
+  "captured": "2026-10-11",
+  "mtu": 23,
+  "identity": {
+   "model": "SB20",
+   "serial": "H0603210071",
+   "firmware": "1.1",
+   "hardware": "0.0",
+   "software": "1.12.4+3792",
+   "manufacturer": "Stages Cycling"
+  },
+  "note": "read-only query PDUs incl. the 0x0C/2/7 drivetrain model dump; bike at rest"
+ },
+ "frames": [],
+ "exchanges": [
+  {
+   "pdu": "0x0E/0 Get Bike Status",
+   "req_hex": "0e00",
+   "resp_hex": [
+    "0e000000000201"
+   ]
+  },
+  {
+   "pdu": "0x0A/0 Get Power-Meter Pairing",
+   "req_hex": "0a00",
+   "resp_hex": [
+    "0a014a0180a91e850a03aeb2c35b6d02"
+   ]
+  },
+  {
+   "pdu": "0x10/1 Get Parameters",
+   "req_hex": "1001",
+   "resp_hex": [
+    "10010102"
+   ]
+  },
+  {
+   "pdu": "0x04/0 Get Resistance",
+   "req_hex": "0400",
+   "resp_hex": [
+    "040000"
+   ]
+  },
+  {
+   "pdu": "0x05/0 Get Gradient Scaling",
+   "req_hex": "0500",
+   "resp_hex": [
+    "0500c80000"
+   ]
+  },
+  {
+   "pdu": "0x03/0 Get Weight",
+   "req_hex": "0300",
+   "resp_hex": [
+    "0300d0204006"
+   ]
+  },
+  {
+   "pdu": "0x0C/0/2 Gearing Get",
+   "req_hex": "0c0002",
+   "resp_hex": [
+    "0c0100010322001c000004"
+   ]
+  },
+  {
+   "pdu": "0x0C/2/7 Get drivetrain model",
+   "req_hex": "0c0207",
+   "resp_hex": [
+    "0c020800010c0f00040d00",
+    "0c032224201c18151311",
+    "0c020900010c0f00040d00"
+   ]
+  },
+  {
+   "pdu": "0x0B/1 Get button configuration",
+   "req_hex": "0b01",
+   "resp_hex": [
+    "0b01030405030405030404030102030400"
+   ]
+  }
+ ]
+}

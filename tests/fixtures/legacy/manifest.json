@@ -1,0 +1,30 @@
+{
+ "device_name": "Stages Bike 0071",
+ "captures": [
+  {
+   "file": "ride.json",
+   "kind": "ride",
+   "frames": 725,
+   "duration_s": 124.5,
+   "streams": [
+    "api",
+    "csc",
+    "ftms_data"
+   ]
+  },
+  {
+   "file": "queries.json",
+   "kind": "queries",
+   "exchanges": 9
+  },
+  {
+   "file": "buttons.json",
+   "kind": "buttons",
+   "frames": 59,
+   "streams": [
+    "buttons"
+   ],
+   "note": "0c46be60 button events, one control at a time"
+  }
+ ]
+}
