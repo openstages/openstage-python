@@ -173,6 +173,21 @@ if settings is not None:
 The return value is `None` when the header is not in the bundled data or when
 more than one preset matches. A returned `GearSettings` has not been committed.
 
+A header read reports flash but does not reload or prove the active RAM map, so
+a session can start with RAM and flash disagreeing. `resync_drivetrain()` does
+the whole job. It queries the bike, collects the map fragments, matches the
+stored preset, applies it and updates the state.
+
+```python
+from openstage.gearing_data import resync_drivetrain
+
+fragments: list[bytes] = []
+bike.add_listener(lambda note: fragments.append(note.record.data)
+                  if isinstance(note.record, pdu.GearMapFragment) else None)
+results = await bike.query_all()
+message = await resync_drivetrain(bike, state, results, fragments)
+```
+
 ### `GearSet`
 
 ```python

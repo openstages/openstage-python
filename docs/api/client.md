@@ -168,6 +168,7 @@ settings store (`0xFD/0`) after the Set and includes a `StoreResult`.
 | `set_button_actions(actions, *, store=False)` | Sets 14 physical buttons from `ButtonAction` values. | Values are the action enum members. |
 | `set_button_slots(changes, *, store=False)` | Changes selected physical buttons 1…14. | Other assignments are preserved from a read-back. |
 | `store_settings()` | Sends the settings store and waits for a terminal reply. Raises `BikeTimeout` when none arrives within `store_timeout`. | Returns `StoreResult`. |
+| `ftms_control(value)` | Writes one Fitness Machine Control Point value unchanged and returns after the write. The bike's answer arrives later as an indication on the same characteristic. | Any FTMS op code from Table 4.15 with at least its parameter bytes. |
 
 `set_control_mode()` takes a `ControlMode`:
 

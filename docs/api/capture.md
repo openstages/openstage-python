@@ -23,7 +23,7 @@ happens when the capture is loaded.
 ```
 
 The allowed `stream` values are `api`, `buttons`, `brake`, `ftms_data`,
-`ftms_status` and `csc`. Times are seconds from the start of the capture.
+`ftms_status`, `ftms_control` and `csc`. Times are seconds from the start of the capture.
 
 The loader also reads an older shape where the identity lives in a `meta`
 object and exchanges use `req_hex` and `resp_hex`. Both shapes produce the same

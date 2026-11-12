@@ -34,6 +34,7 @@ class FakeTransport:
         self.responses = responses or {}
         self._connected = False
         self.writes: list[bytes] = []
+        self.ftms_writes: list[bytes] = []
         self.callbacks: dict[str, Callable[[bytes], None]] = {}
         self.stopped: list[str] = []
 
@@ -61,8 +62,11 @@ class FakeTransport:
         raise KeyError(uuid)
 
     async def write_characteristic(self, uuid: str, data: bytes) -> None:
-        assert uuid == uuids.API_REQUEST
         assert self._connected
+        if uuid == uuids.FTMS_CONTROL_POINT:
+            self.ftms_writes.append(data)
+            return
+        assert uuid == uuids.API_REQUEST
         self.writes.append(data)
         callback = self.callbacks.get(uuids.API_RESPONSE)
         for response in self.responses.get(data, []):
@@ -701,3 +705,53 @@ def test_gear_settings_enforce_limits_and_sort() -> None:
     assert plan.total_gears == 24
     assert plan.map_size == 14
     assert plan.header.pdu.hex() == "0c020000020c8f00040e00"
+
+
+async def test_ftms_control_subscribes_and_writes_verbatim() -> None:
+    transport = FakeTransport()
+    client = SB20Client(
+        transport=transport,
+        request_timeout=0.2,
+        subscribe_buttons=False,
+        subscribe_ftms=True,
+        subscribe_csc=False,
+    )
+    await client.connect()
+    try:
+        assert uuids.FTMS_CONTROL_POINT in transport.callbacks
+        await client.ftms_control(bytes.fromhex("0000"))
+        assert transport.ftms_writes == [bytes.fromhex("0000")]
+        with pytest.raises(pdu.SafetyError):
+            await client.ftms_control(b"\x42")
+    finally:
+        await client.close()
+
+
+async def test_ftms_control_writes_never_overlap() -> None:
+    class SlowTransport(FakeTransport):
+        active = 0
+
+        async def write_characteristic(self, uuid: str, data: bytes) -> None:
+            if uuid != uuids.FTMS_CONTROL_POINT:
+                await super().write_characteristic(uuid, data)
+                return
+            type(self).active += 1
+            assert type(self).active == 1, "two BLE writes were in flight"
+            await asyncio.sleep(0.01)
+            type(self).active -= 1
+            self.ftms_writes.append(data)
+
+    transport = SlowTransport()
+    client = SB20Client(
+        transport=transport,
+        request_timeout=0.2,
+        subscribe_buttons=False,
+        subscribe_ftms=True,
+        subscribe_csc=False,
+    )
+    await client.connect()
+    try:
+        await asyncio.gather(*(client.ftms_control(b"\x00\x00") for _ in range(5)))
+        assert transport.ftms_writes == [b"\x00\x00"] * 5
+    finally:
+        await client.close()

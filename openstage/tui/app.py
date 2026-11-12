@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import warnings
 from collections import deque
@@ -39,7 +40,15 @@ from .. import pdu
 from ..pdu import SensorFirmware, Stream
 from ..replay import ReplayClient
 from ..state import API_POWER_SOURCE, FTMS_SOURCE, SOURCE_LABELS, BikeState
-from ..gearing_data import load_cassettes, load_front_rings, settings_for_stored_header
+from ..gearing_data import load_cassettes, load_front_rings, resync_drivetrain
+from ..wftnp import (
+    DEFAULT_MAC,
+    DEFAULT_NAME,
+    DEFAULT_PORT,
+    DEFAULT_SERIAL,
+    SERVICE,
+    WftnpBridge,
+)
 
 BUTTON_DEBOUNCE_S = 0.04
 ERG_HOLD_DELAY_S = 0.5
@@ -931,12 +940,15 @@ class DashApp(App[None]):
         log_lines: deque[str],
         *,
         allow_telemetry: bool,
+        wftnp: bool = False,
     ) -> None:
         super().__init__()
         self.feed = feed
         self.state = state
         self.log_lines = log_lines
         self.allow_telemetry = allow_telemetry
+        self._wftnp = wftnp
+        self._bridge: WftnpBridge | None = None
         self._logged = 0
         self._feed_task: asyncio.Task[None] | None = None
         self._status_task: asyncio.Task[None] | None = None
@@ -1004,53 +1016,25 @@ class DashApp(App[None]):
                 if isinstance(feed, SB20Client):
                     feed.remove_listener(_collect_fragment)
             self._ingest_sensor_sides(results)
-            gear_model = results.get("gear_model")
-            if isinstance(gear_model, pdu.GearModelHeader):
-                # The header read reports flash but does not reload or prove the
-                # active RAM map.  Identify the stored preset and re-apply it,
-                # so the next session is in sync with flash; this also refills
-                # the transfer buffer for a later store.
-                self.state.ingest(gear_model, Stream.API)
-                if isinstance(feed, SB20Client):
-                    gear = results.get("current_gear")
-                    current = gear if isinstance(gear, pdu.GearNotification) else None
-                    settings = settings_for_stored_header(
-                        feed, gear_model, boot_fragments, current
-                    )
-                    if settings is None:
-                        self.log_lines.append(
-                            "drivetrain: stored preset not in the bundled "
-                            "database or ambiguous; RAM may differ from flash"
-                        )
-                    else:
-                        plan = settings.plan()
-                        try:
-                            await settings.commit()
-                        except BikeError as exc:
-                            self.log_lines.append(
-                                f"drivetrain resync failed: {exc}"
-                            )
-                        else:
-                            self.state.set_known_drivetrain(
-                                plan.as_header(), plan.map_bytes
-                            )
-                            self.log_lines.append(
-                                "drivetrain: re-applied stored preset "
-                                f"({plan.front_count}×{plan.rear_count}, "
-                                f"CRC 0x{plan.crc8:02X})"
-                            )
-                    try:
-                        self.state.ingest(
-                            await feed.get_current_gear(), Stream.API
-                        )
-                    except BikeError:
-                        pass
+            if isinstance(feed, SB20Client):
+                message = await resync_drivetrain(
+                    feed, self.state, results, boot_fragments
+                )
+                if message is not None:
+                    self.log_lines.append(message)
             if self.allow_telemetry and isinstance(feed, SB20Client):
                 await feed.open_telemetry(power=True, gearing=True)
+            if self._wftnp and isinstance(feed, SB20Client):
+                await self._start_bridge(feed)
             if isinstance(feed, SB20Client):
                 self._status_task = asyncio.create_task(self._poll_status())
             async for note in feed.notifications():
                 self.state.apply(note)
+                if self._bridge is not None:
+                    try:
+                        await self._bridge.handle(note)
+                    except Exception as exc:
+                        self.log_lines.append(f"wftnp: cannot forward a frame: {exc}")
                 if isinstance(note.record, pdu.ButtonFrame):
                     self._on_button_frame()
                 self.log_lines.append(f"{note.stream.value}: {note.hex} -> "
@@ -1062,6 +1046,45 @@ class DashApp(App[None]):
             self.log_lines.append(f"feed error: {exc}")
         else:
             self.state.status = feed.status
+
+    async def _start_bridge(self, feed: SB20Client) -> None:
+        """Serve this connection to a cycling app on the standard port.
+
+        Apps remember the endpoint they last used, so the conventional port
+        keeps working across restarts. An ephemeral port is only a fallback
+        for when another bridge already holds it.
+        """
+
+        txt = {
+            "serial-number": feed.identity.serial or DEFAULT_SERIAL,
+            "mac-address": DEFAULT_MAC,
+            "ble-service-uuids": SERVICE,
+        }
+        bridge: WftnpBridge | None = None
+        for port in (DEFAULT_PORT, 0):
+            candidate = WftnpBridge(
+                feed,
+                name=DEFAULT_NAME,
+                txt=txt,
+                port=port,
+                standalone=False,
+            )
+            try:
+                await candidate.start()
+            except OSError as exc:
+                self.log_lines.append(f"wftnp: port {port} unavailable: {exc}")
+                continue
+            except Exception as exc:
+                self.log_lines.append(f"wftnp: cannot start the endpoint: {exc}")
+                return
+            bridge = candidate
+            break
+        if bridge is None:
+            return
+        self._bridge = bridge
+        self.log_lines.append(
+            f"wftnp: serving {DEFAULT_NAME} on port {bridge.server.port}"
+        )
 
     async def _poll_status(self) -> None:
         assert isinstance(self.feed, SB20Client)
@@ -1276,6 +1299,12 @@ class DashApp(App[None]):
             self._status_task.cancel()
         if self._feed_task is not None:
             self._feed_task.cancel()
+        if self._bridge is not None:
+            try:
+                await self._bridge.stop()
+            except Exception:
+                pass
+            self._bridge = None
         try:
             await self.feed.close()
         except Exception:
@@ -1344,6 +1373,10 @@ def main(argv: list[str] | None = None) -> int:
     add_connection_arguments(parser)
     parser.add_argument("--no-telemetry", action="store_true",
                         help="do not open the reversible telemetry subscriptions")
+    parser.add_argument("--no-wftnp", action="store_true",
+                        help="do not serve the WFTNP endpoint to a local app")
+    parser.add_argument("--debug", action="store_true",
+                        help="write DEBUG logging, including WFTNP frames, to openstage-tui.log")
     parser.add_argument("--snapshot", type=float, metavar="SECONDS",
                         help="headless: feed for SECONDS, print the screen, exit")
     parser.add_argument("--json", action="store_true",
@@ -1351,6 +1384,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=110)
     parser.add_argument("--height", type=int, default=36)
     options = parser.parse_args(argv)
+
+    if options.debug:
+        logging.basicConfig(
+            filename="openstage-tui.log",
+            filemode="w",
+            level=logging.DEBUG,
+            format="%(asctime)s.%(msecs)03d %(name)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
 
     feed = _make_feed(options)
     state = BikeState()
@@ -1373,7 +1415,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        DashApp(feed, state, log_lines, allow_telemetry=allow_telemetry).run()
+        DashApp(
+            feed,
+            state,
+            log_lines,
+            allow_telemetry=allow_telemetry,
+            wftnp=not options.no_wftnp,
+        ).run()
     except KeyboardInterrupt:
         pass
     except Exception as exc:

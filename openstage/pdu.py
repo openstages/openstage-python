@@ -217,6 +217,7 @@ class Stream(StrEnum):
     BRAKE = "brake"
     FTMS_DATA = "ftms_data"
     FTMS_STATUS = "ftms_status"
+    FTMS_CONTROL = "ftms_control"
     CSC = "csc"
 
 
@@ -1566,3 +1567,56 @@ def ensure_write_allowed(pdu: bytes) -> str:
         f"refusing configuration write {raw.hex()!r}: operation/command/length "
         "is outside the approved write slice"
     )
+
+
+#: Parameter bytes required by each client-writable Fitness Machine Control
+#: Point op code (FTMS Table 4.15). ``0x80`` Response Code is server-to-client
+#: only, so it is absent here.
+FTMS_CONTROL_PARAMETERS: Final[Mapping[int, int]] = MappingProxyType(
+    {
+        0x00: 0,  # Request Control
+        0x01: 0,  # Reset
+        0x02: 2,  # Set Target Speed, UINT16
+        0x03: 2,  # Set Target Inclination, SINT16
+        0x04: 1,  # Set Target Resistance Level, UINT8
+        0x05: 2,  # Set Target Power, SINT16
+        0x06: 1,  # Set Target Heart Rate, UINT8
+        0x07: 0,  # Start or Resume
+        0x08: 1,  # Stop or Pause, control information
+        0x09: 2,  # Set Targeted Expended Energy, UINT16
+        0x0A: 2,  # Set Targeted Number of Steps, UINT16
+        0x0B: 2,  # Set Targeted Number of Strides, UINT16
+        0x0C: 3,  # Set Targeted Distance, UINT24
+        0x0D: 2,  # Set Targeted Training Time, UINT16
+        0x0E: 4,  # Set Targeted Time in Two Heart Rate Zones
+        0x0F: 6,  # Set Targeted Time in Three Heart Rate Zones
+        0x10: 10,  # Set Targeted Time in Five Heart Rate Zones
+        0x11: 6,  # Set Indoor Bike Simulation Parameters
+        0x12: 2,  # Set Wheel Circumference, UINT16
+        0x13: 1,  # Spin Down Control, control parameter
+        0x14: 2,  # Set Targeted Cadence, UINT16
+    }
+)
+
+
+def ensure_ftms_control(pdu: bytes) -> str:
+    """Validate a Fitness Machine Control Point write and return its label.
+
+    The WFTNP bridge forwards every op code the FTMS specification defines, so
+    the check is structural: a known op code with at least its parameter bytes.
+    It stops bytes that are not FTMS at all, while leaving the bike to answer
+    unsupported procedures with its own result code.
+    """
+
+    raw = bytes(pdu)
+    if not raw:
+        raise SafetyError("refusing empty FTMS control point write")
+    op = raw[0]
+    expected = FTMS_CONTROL_PARAMETERS.get(op)
+    if expected is None:
+        raise SafetyError(f"unknown FTMS control point op code: {op:#04x}")
+    if len(raw) - 1 < expected:
+        raise SafetyError(
+            f"FTMS op code {op:#04x} needs {expected} parameter bytes: {raw.hex()}"
+        )
+    return f"FTMS control point {op:#04x}"
