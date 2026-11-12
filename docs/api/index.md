@@ -20,6 +20,7 @@ from openstage import pdu
 | `openstage.replay` | `ReplayClient`. |
 | `openstage.gearing_data` | Bundled drivetrain tables and stored-preset recovery. |
 | `openstage.uuids` | GATT UUIDs used by the bike. |
+| `openstage.wftnp` | WFTNP endpoint: frame codec, GATT server, Elite Square, FTMS proxy, weight-only Stages service and the bridge. |
 | `openstage.probe` | `openstage-probe` entry point. |
 | `openstage.write_cli` | `openstage-write` entry point. |
 | `openstage.tui` | Terminal dashboard. |

@@ -16,10 +16,13 @@ The library covers:
 - zero-reset calibration;
 - Dream Drive and front-ring/cassette drivetrain maps, with separate RAM apply
   and flash store;
-- JSON capture and offline replay.
+- JSON capture and offline replay;
+- an optional WFTNP endpoint that presents the bike to a local cycling app over
+  TCP and mDNS.
 
-It does not implement firmware updates, factory reset or the FTMS control
-point.
+It does not implement firmware updates or factory reset. It does not interpret
+FTMS control point procedures; `ftms_control()` forwards an op code to the bike
+unchanged and the bike's indication comes back on the notification stream.
 
 ## Install
 
@@ -102,6 +105,7 @@ openstage-write weight --user-kg 85.1 --store --yes
 | `openstage-probe` | Read-only queries, optional telemetry and capture. |
 | `openstage-write` | Explicit configuration writes; requires `--yes`. |
 | `openstage-tui` | Terminal dashboard with ERG and drivetrain controls. |
+| `openstage-wftnp` | Serves the bike to a cycling app over TCP and mDNS. |
 
 ## Documentation
 
@@ -111,6 +115,7 @@ openstage-write weight --user-kg 85.1 --store --yes
 - [Bike notes](docs/bike-notes.md)
 - [Control and telemetry service specification](docs/stages-sb20-control-telemetry-service.md)
 - [Button and brake service specification](docs/stages-sb20-button-brake-service.md)
+- [WFTNP endpoint](docs/api/wftnp.md)
 
 ## Safety
 

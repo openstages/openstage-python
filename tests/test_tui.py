@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from textual.containers import Grid
 from textual.widgets import Button, Checkbox, Input, Select
@@ -15,6 +16,7 @@ from openstage.client import DrivetrainMode, SB20Client
 from openstage.replay import ReplayClient
 from openstage.state import API_POWER_SOURCE, FTMS_SOURCE, BikeState
 from openstage.tui.app import DashApp, run_snapshot, screen_text, summary
+from openstage.wftnp import DEFAULT_PORT
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy"
 
@@ -93,8 +95,8 @@ async def test_more_data_panel_omits_slot_nineteen() -> None:
         await asyncio.sleep(0.4)
         await pilot.pause()
         text = screen_text(app)
-        assert "14:" in text
-        assert "15:" not in text
+        assert "14: " in text
+        assert "15: " not in text
         assert "wire slots 1,2,3,6,7,8,11…18" in text
 
 
@@ -590,7 +592,8 @@ async def test_gearing_screen_live_apply_switches_to_simulation_and_updates_stat
 
         grade_zero = bytes.fromhex("0f000000000000000000")
         assert transport.writes[0] == grade_zero
-        assert transport.writes == [
+        # The dashboard's status poll may inject 0e00 between these writes.
+        assert [w for w in transport.writes if w != b"\x0e\x00"] == [
             grade_zero,
             plan.header.pdu,
             *(fragment.pdu for fragment in plan.fragments),
@@ -603,11 +606,13 @@ async def test_gearing_screen_live_apply_switches_to_simulation_and_updates_stat
         assert state.model_header.model is pdu.ModelType.COEFFICIENTS
         assert state.drivetrain_view().map_complete is True
 
+        stored_from = len(transport.writes)
         app.screen.query_one("#gear-store", Button).press()
         await asyncio.sleep(0.3)
         await pilot.pause()
 
-        assert transport.writes[-2:] == [b"\x0c\x02\x03", b"\x0c\x02\x07"]
+        stored = [w for w in transport.writes[stored_from:] if w != b"\x0e\x00"]
+        assert stored[:2] == [b"\x0c\x02\x03", b"\x0c\x02\x07"]
         assert state.model_header is not None
         assert state.model_header.model is pdu.ModelType.COEFFICIENTS
         assert state.drivetrain_view().map_complete is True
@@ -672,11 +677,13 @@ async def test_gearing_store_without_apply_keeps_known_map() -> None:
         # The boot resync (which also refilled the store buffer) supplied the map.
         assert state.drivetrain_view().map_complete is True
 
+        stored_from = len(transport.writes)
         app.screen.query_one("#gear-store", Button).press()
         await asyncio.sleep(0.3)
         await pilot.pause()
 
-        assert transport.writes[-2:] == [b"\x0c\x02\x03", b"\x0c\x02\x07"]
+        stored = [w for w in transport.writes[stored_from:] if w != b"\x0e\x00"]
+        assert stored[:2] == [b"\x0c\x02\x03", b"\x0c\x02\x07"]
         assert "stored; flash header read back" in screen_text(app)
         assert state.drivetrain_view().map_complete is True
     await client.close()
@@ -729,3 +736,85 @@ async def test_gearing_failed_transfer_keeps_real_header_in_state() -> None:
         assert state.model_header.rear_count == 12
         assert "failed" in screen_text(app).lower()
     await client.close()
+
+
+async def test_dashboard_serves_the_bridge_when_asked(monkeypatch: Any) -> None:
+    import openstage.tui.app as app_module
+
+    started: list[Any] = []
+    stopped: list[Any] = []
+
+    class FakeBridge:
+        def __init__(self, client: object, **options: Any) -> None:
+            self.server = type("Server", (), {"port": 12345})()
+            self.options = options
+            started.append(self)
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            stopped.append(self)
+
+        async def handle(self, note: object) -> None:
+            return None
+
+    monkeypatch.setattr(app_module, "WftnpBridge", FakeBridge)
+    transport = _TuiTransport(_tui_responses())
+    client = SB20Client(
+        transport=transport,
+        request_timeout=1.0,
+        subscribe_buttons=False,
+        subscribe_ftms=False,
+        subscribe_csc=False,
+    )
+    app = DashApp(
+        client, BikeState(), deque(maxlen=400), allow_telemetry=False, wftnp=True
+    )
+    async with app.run_test(size=(120, 60)) as pilot:
+        await asyncio.sleep(0.4)
+        await pilot.pause()
+        assert len(started) == 1
+        assert started[0].options["standalone"] is False
+        assert started[0].options["port"] == DEFAULT_PORT
+    assert len(stopped) == 1
+
+
+async def test_dashboard_falls_back_to_an_ephemeral_port(monkeypatch: Any) -> None:
+    import openstage.tui.app as app_module
+
+    attempts: list[int] = []
+
+    class BusyBridge:
+        def __init__(self, client: object, **options: Any) -> None:
+            self.port = options["port"]
+            self.server = type("Server", (), {"port": 5000})()
+            attempts.append(self.port)
+
+        async def start(self) -> None:
+            if self.port != 0:
+                raise OSError("address already in use")
+
+        async def stop(self) -> None:
+            return None
+
+        async def handle(self, note: object) -> None:
+            return None
+
+    monkeypatch.setattr(app_module, "WftnpBridge", BusyBridge)
+    transport = _TuiTransport(_tui_responses())
+    client = SB20Client(
+        transport=transport,
+        request_timeout=1.0,
+        subscribe_buttons=False,
+        subscribe_ftms=False,
+        subscribe_csc=False,
+    )
+    app = DashApp(
+        client, BikeState(), deque(maxlen=400), allow_telemetry=False, wftnp=True
+    )
+    async with app.run_test(size=(120, 60)) as pilot:
+        await asyncio.sleep(0.4)
+        await pilot.pause()
+        assert attempts == [DEFAULT_PORT, 0]
+        assert app._bridge is not None

@@ -132,6 +132,7 @@ CscMeasurement(
 | `BRAKE` | `"brake"` |
 | `FTMS_DATA` | `"ftms_data"` |
 | `FTMS_STATUS` | `"ftms_status"` |
+| `FTMS_CONTROL` | `"ftms_control"` |
 | `CSC` | `"csc"` |
 
 ### `Op`
@@ -264,6 +265,13 @@ every operation outside the approved slice raise `SafetyError`.
 The gate accepts `0C 02 0B` with the full transfer header, which is how APPLY is
 sent. It also validates the header's model, counts, CRC range, map size and
 Dream Drive step for the request and apply commands.
+
+#### `ensure_ftms_control(pdu: bytes) -> str`
+
+Validates one Fitness Machine Control Point write: the op code must be one the
+FTMS specification defines (Table 4.15) and carry at least its parameter bytes.
+The bridge uses it so every FTMS procedure the bike implements stays reachable
+while non-FTMS bytes never reach the radio.
 
 ## Gearing helpers
 

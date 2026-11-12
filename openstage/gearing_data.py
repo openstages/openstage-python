@@ -9,13 +9,14 @@ library when new cassettes and chainring sets appear. After editing
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.resources import files
 
 from . import pdu
-from .client import DrivetrainMode, GearSettings, SB20Client
+from .client import BikeError, DrivetrainMode, GearSettings, SB20Client
+from .state import BikeState
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,3 +199,50 @@ def settings_for_stored_header(
         .set_cassette_gears(tuple(payload[header.front_count :]))
     )
     return settings if settings.plan().matches(header) else None
+
+
+async def resync_drivetrain(
+    client: SB20Client,
+    state: BikeState,
+    results: Mapping[str, pdu.Pdu | Exception],
+    fragments: Sequence[bytes] = (),
+) -> str | None:
+    """Re-apply the drivetrain preset that flash holds.
+
+    A header read reports flash but neither reloads nor proves the active RAM
+    map, so a session can start with RAM and flash disagreeing and the live
+    gear notifications then describe a drivetrain the app was not told about.
+    This identifies the stored preset in the bundled data and applies it,
+    which also refills the transfer buffer for a later store.
+
+    ``results`` is a completed :meth:`SB20Client.query_all`; ``fragments`` are
+    the map fragments observed while it ran. Returns a message for the caller's
+    log, or ``None`` when the query carried no header.
+    """
+
+    header = results.get("gear_model")
+    if not isinstance(header, pdu.GearModelHeader):
+        return None
+    state.ingest(header, pdu.Stream.API)
+    gear = results.get("current_gear")
+    current = gear if isinstance(gear, pdu.GearNotification) else None
+    settings = settings_for_stored_header(client, header, fragments, current)
+    if settings is None:
+        return (
+            "drivetrain: stored preset not in the bundled database or "
+            "ambiguous; RAM may differ from flash"
+        )
+    plan = settings.plan()
+    try:
+        await settings.commit()
+    except BikeError as exc:
+        return f"drivetrain resync failed: {exc}"
+    state.set_known_drivetrain(plan.as_header(), plan.map_bytes)
+    try:
+        state.ingest(await client.get_current_gear(), pdu.Stream.API)
+    except BikeError:
+        pass
+    return (
+        "drivetrain: re-applied stored preset "
+        f"({plan.front_count}×{plan.rear_count}, CRC 0x{plan.crc8:02X})"
+    )

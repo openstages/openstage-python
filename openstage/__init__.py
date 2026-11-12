@@ -79,7 +79,7 @@ from .pdu import (
 )
 from .replay import ReplayClient
 from .state import BikeState, DrivetrainView, Reading
-from .gearing_data import settings_for_stored_header
+from .gearing_data import resync_drivetrain, settings_for_stored_header
 
 __all__ = [
     "Battery",
@@ -106,6 +106,7 @@ __all__ = [
     "ErrorPdu",
     "GearPlan",
     "GearSettings",
+    "resync_drivetrain",
     "settings_for_stored_header",
     "GearStoreResult",
     "GearTransferResult",

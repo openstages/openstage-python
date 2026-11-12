@@ -841,6 +841,7 @@ class SB20Client:
         if self._subscribe_ftms:
             streams.append((Stream.FTMS_DATA, uuids.FTMS_INDOOR_BIKE_DATA, False))
             streams.append((Stream.FTMS_STATUS, uuids.FTMS_STATUS, False))
+            streams.append((Stream.FTMS_CONTROL, uuids.FTMS_CONTROL_POINT, False))
         if self._subscribe_csc:
             streams.append((Stream.CSC, uuids.CSC_MEASUREMENT, False))
 
@@ -1055,6 +1056,29 @@ class SB20Client:
         """Send one explicitly approved configuration write and await its response."""
 
         return await self._exchange(request, configuration=True, timeout=timeout)
+
+    async def ftms_control(self, value: bytes) -> None:
+        """Write one Fitness Machine Control Point value to the bike.
+
+        The write is byte-transparent so every FTMS procedure the bike
+        implements stays reachable; :func:`openstage.pdu.ensure_ftms_control`
+        only rejects unknown op codes and short parameters. The bike answers
+        later with an indication on the same characteristic. The write takes
+        the request lock, so it never overlaps another outgoing BLE operation;
+        concurrent callers queue on that lock in arrival order.
+        """
+
+        pdu.ensure_ftms_control(value)
+        transport = self._transport
+        if transport is None or not transport.is_connected:
+            raise BikeConnectionError("not connected")
+        async with self._request_lock:
+            try:
+                await transport.write_characteristic(
+                    uuids.FTMS_CONTROL_POINT, bytes(value)
+                )
+            except Exception as exc:
+                raise BikeConnectionError(f"write failed: {exc}") from exc
 
     async def _exchange(
         self,

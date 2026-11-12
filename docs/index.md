@@ -6,9 +6,10 @@ covers the parts of the bike that a riding or testing application needs.
 That includes identity, sensor status, rider telemetry, configuration reads,
 configuration writes, calibration and the virtual drivetrain.
 
-The library does not implement firmware updates, factory reset, or the standard
-FTMS control point. It also does not try to be a training application; it gives
-you typed records and leaves the presentation to you.
+The library does not implement firmware updates or factory reset. It does not
+interpret FTMS control point procedures; `openstage.wftnp` forwards them to the
+bike unchanged. It also does not try to be a training application; it gives you
+typed records and leaves the presentation to you.
 
 ## Requirements
 
@@ -33,13 +34,14 @@ For a normal user install:
 pipx install .
 ```
 
-The package installs three commands:
+The package installs four commands:
 
 | Command | Purpose |
 |---|---|
 | `openstage-probe` | Read-only probe and capture writer. |
 | `openstage-write` | Explicit configuration writes. |
 | `openstage-tui` | Terminal dashboard. |
+| `openstage-wftnp` | WFTNP endpoint for a cycling app. |
 
 ## First connection
 
@@ -147,6 +149,7 @@ the dashboard and `BikeState` work without a radio.
 | [State](api/state.md) | `BikeState` and source selection. |
 | [Transport](api/transport.md) | BLE boundary, discovery and bleak. |
 | [Capture and replay](api/capture.md) | JSON session format and offline replay. |
+| [WFTNP endpoint](api/wftnp.md) | Serve the bike to a cycling app over TCP and mDNS. |
 | [Command line](cli.md) | `openstage-probe`, `openstage-write`, `openstage-tui`. |
 | [Bike notes](bike-notes.md) | Behaviour and limits worth knowing before you write. |
 | [Control and telemetry service](stages-sb20-control-telemetry-service.md) | Wire specification for the control service. |

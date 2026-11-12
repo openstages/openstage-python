@@ -1,12 +1,13 @@
 # Command line
 
-The package installs three commands. They share the connection options
-`--address`, `--name`, `--scan-timeout` and `--request-timeout`.
+The package installs four commands. The first three share the connection
+options `--address`, `--name`, `--scan-timeout` and `--request-timeout`.
 
 ```sh
 openstage-probe --help
 openstage-write --help
 openstage-tui --help
+openstage-wftnp --help
 ```
 
 ## Connection options
@@ -193,7 +194,9 @@ made by another tool and you only need to persist the current settings record.
 ## `openstage-tui`
 
 The dashboard uses the live control path for ERG simulation and configuration,
-or a capture for offline review.
+or a capture for offline review. A live session also serves the WFTNP endpoint,
+so a cycling app can ride against the same bike while the dashboard shows what
+it sends.
 
 ```sh
 openstage-tui
@@ -207,6 +210,7 @@ openstage-tui --replay session.json --snapshot 2 --json
 | `--speed FACTOR` | Replay speed multiplier. Default 1. |
 | `--loop` | Loop a replay. |
 | `--no-telemetry` | Do not open the reversible telemetry subscriptions. |
+| `--no-wftnp` | Do not serve the WFTNP endpoint while the dashboard runs. |
 | `--snapshot SECONDS` | Headless mode. Feed for this long, print the screen, then exit. |
 | `--json` | With `--snapshot`, also print the state as JSON. |
 | `--width` | Snapshot width. Default 110. |
@@ -265,3 +269,26 @@ times out, because the bike has no cancel command.
 
 In replay mode the dashboard disables every write control. It still renders
 rider metrics, read-back values and the drivetrain view from the capture.
+
+## `openstage-wftnp`
+
+Serves the bike to a local cycling application over the WFTNP tunnel and
+advertises it over mDNS. [The WFTNP page](api/wftnp.md) describes what the
+endpoint exposes.
+
+```sh
+openstage-wftnp --address AA:BB:CC:DD:EE:FF
+```
+
+| Option | Meaning |
+|---|---|
+| `--name TEXT` | mDNS instance name, not a discovery filter. It must contain `square` for Elite detection. Default `Square Bridge`. |
+| `--port PORT` | TCP port to listen on. Default 36866. |
+| `--serial TEXT` | `serial-number` TXT value. |
+| `--mac TEXT` | `mac-address` TXT value. Keep it stable, because the app keys button bindings by it. |
+| `--no-advertise` | Serve TCP without mDNS. |
+| `--debug` | Log every WFTNP frame in both directions. |
+
+SIGINT and SIGTERM stop the endpoint and close the Bluetooth link. Killing the
+process with an uncatchable signal leaves BlueZ holding the connection, and the
+bike refuses the next one until it is disconnected.
