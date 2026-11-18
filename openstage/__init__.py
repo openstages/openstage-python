@@ -83,6 +83,7 @@ from .pdu import (
     ensure_write_allowed,
     parse_button_action,
 )
+from .capture import CaptureFormatError
 from .replay import ReplayClient
 from .state import BikeState, DrivetrainView, Reading
 from .gearing_data import resync_drivetrain, settings_for_stored_header
@@ -108,6 +109,7 @@ __all__ = [
     "BikeStatus",
     "BikeTimeout",
     "BrakeFrame",
+    "CaptureFormatError",
     "ControlMode",
     "ButtonAssignments",
     "ButtonFrame",

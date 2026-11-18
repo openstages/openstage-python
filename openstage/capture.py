@@ -21,6 +21,10 @@ from .pdu import Stream
 FORMAT = "openstage-capture/1"
 
 
+class CaptureFormatError(ValueError):
+    """A capture file is not valid JSON or does not match its format."""
+
+
 @dataclass(frozen=True, slots=True)
 class CapturedFrame:
     t: float
@@ -81,43 +85,76 @@ class Capture:
 
 def load_capture(path: str | Path) -> Capture:
     source = Path(path)
-    data: Any = json.loads(source.read_text(encoding="utf-8"))
+    try:
+        data: Any = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CaptureFormatError(f"{source}: invalid JSON: {exc}") from exc
+    except OSError as exc:
+        raise CaptureFormatError(f"{source}: cannot read capture: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{source}: capture root must be an object")
-    if data.get("format") == FORMAT:
-        return _load_current(data)
-    return _load_legacy(data)
+        raise CaptureFormatError(f"{source}: capture root must be an object")
+    format_value = data.get("format")
+    if format_value == FORMAT:
+        return _load_current(data, source)
+    if format_value is not None:
+        raise CaptureFormatError(
+            f"{source}: unsupported capture format {format_value!r}"
+        )
+    return _load_legacy(data, source)
 
 
-def _parse_frames(items: Any) -> tuple[CapturedFrame, ...]:
+def _array(value: Any, source: Path, label: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise CaptureFormatError(f"{source}: {label} must be an array")
+    return value
+
+
+def _parse_frames(items: Any, source: Path) -> tuple[CapturedFrame, ...]:
     frames: list[CapturedFrame] = []
-    for item in items or []:
+    for index, item in enumerate(_array(items, source, "frames")):
+        if not isinstance(item, dict):
+            raise CaptureFormatError(f"{source}: frames[{index}] must be an object")
         try:
             stream = Stream(str(item["stream"]))
             raw = bytes.fromhex(str(item["hex"]))
             t = float(item["t"])
-        except (KeyError, TypeError, ValueError):
-            continue
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CaptureFormatError(
+                f"{source}: frames[{index}] is invalid: {exc}"
+            ) from exc
         frames.append(CapturedFrame(t=t, stream=stream, raw=raw))
     return tuple(sorted(frames, key=lambda frame: frame.t))
 
 
-def _parse_current_exchanges(items: Any) -> tuple[CapturedExchange, ...]:
+def _parse_current_exchanges(items: Any, source: Path) -> tuple[CapturedExchange, ...]:
     exchanges: list[CapturedExchange] = []
-    for item in items or []:
+    for index, item in enumerate(_array(items, source, "exchanges")):
+        if not isinstance(item, dict):
+            raise CaptureFormatError(f"{source}: exchanges[{index}] must be an object")
         try:
             request = bytes.fromhex(str(item["request"]))
-            responses = tuple(bytes.fromhex(str(value)) for value in item.get("responses") or [])
-        except (KeyError, TypeError, ValueError):
-            continue
-        exchanges.append(CapturedExchange(request=request, responses=responses,
-                                          t=float(item.get("t", 0.0))))
+            raw_responses = item.get("responses", [])
+            if not isinstance(raw_responses, list):
+                raise TypeError("responses must be an array")
+            responses = tuple(bytes.fromhex(str(value)) for value in raw_responses)
+            t = float(item.get("t", 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CaptureFormatError(
+                f"{source}: exchanges[{index}] is invalid: {exc}"
+            ) from exc
+        exchanges.append(
+            CapturedExchange(request=request, responses=responses, t=t)
+        )
     return tuple(exchanges)
 
 
-def _parse_legacy_exchanges(items: Any) -> tuple[CapturedExchange, ...]:
+def _parse_legacy_exchanges(items: Any, source: Path) -> tuple[CapturedExchange, ...]:
     exchanges: list[CapturedExchange] = []
-    for item in items or []:
+    for index, item in enumerate(_array(items, source, "exchanges")):
+        if not isinstance(item, dict):
+            raise CaptureFormatError(f"{source}: exchanges[{index}] must be an object")
         request_text = item.get("req_hex") or item.get("request")
         if not request_text:
             candidate = item.get("pdu")
@@ -128,13 +165,21 @@ def _parse_legacy_exchanges(items: Any) -> tuple[CapturedExchange, ...]:
         try:
             request = bytes.fromhex(str(request_text or ""))
             raw_responses = item.get("resp_hex") or item.get("responses") or []
+            if not isinstance(raw_responses, list):
+                raise TypeError("responses must be an array")
             responses = tuple(bytes.fromhex(str(value)) for value in raw_responses)
-        except (KeyError, TypeError, ValueError):
-            continue
+            t = float(item.get("t", 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CaptureFormatError(
+                f"{source}: exchanges[{index}] is invalid: {exc}"
+            ) from exc
         if not request:
-            continue
-        exchanges.append(CapturedExchange(request=request, responses=responses,
-                                          t=float(item.get("t", 0.0))))
+            raise CaptureFormatError(
+                f"{source}: exchanges[{index}] has an empty request"
+            )
+        exchanges.append(
+            CapturedExchange(request=request, responses=responses, t=t)
+        )
     return tuple(exchanges)
 
 
@@ -144,7 +189,7 @@ def _identity_from(values: dict[str, Any]) -> BikeIdentity:
                            if key in known and value is not None})
 
 
-def _load_current(data: dict[str, Any]) -> Capture:
+def _load_current(data: dict[str, Any], source: Path) -> Capture:
     identity_data = data.get("identity") or {}
     if not isinstance(identity_data, dict):
         identity_data = {}
@@ -153,14 +198,14 @@ def _load_current(data: dict[str, Any]) -> Capture:
     return Capture(
         identity=identity,
         mtu=int(mtu) if isinstance(mtu, int) else None,
-        frames=_parse_frames(data.get("frames")),
-        exchanges=_parse_current_exchanges(data.get("exchanges")),
+        frames=_parse_frames(data.get("frames"), source),
+        exchanges=_parse_current_exchanges(data.get("exchanges"), source),
         notes=tuple(str(value) for value in data.get("notes") or []),
         captured_at=str(data.get("captured_at")) if data.get("captured_at") else None,
     )
 
 
-def _load_legacy(data: dict[str, Any]) -> Capture:
+def _load_legacy(data: dict[str, Any], source: Path) -> Capture:
     """Read the older capture shape (``meta``/``frames``/``exchanges``)."""
 
     raw_meta = data.get("meta")
@@ -177,8 +222,8 @@ def _load_legacy(data: dict[str, Any]) -> Capture:
     return Capture(
         identity=identity,
         mtu=int(mtu) if isinstance(mtu, int) else None,
-        frames=_parse_frames(data.get("frames")),
-        exchanges=_parse_legacy_exchanges(data.get("exchanges")),
+        frames=_parse_frames(data.get("frames"), source),
+        exchanges=_parse_legacy_exchanges(data.get("exchanges"), source),
         notes=tuple(str(value) for value in data.get("notes") or []),
     )
 

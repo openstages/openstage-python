@@ -43,7 +43,9 @@ openstage-probe --replay session.json --json
 | `--loop` | Replay a capture repeatedly. |
 
 The probe prints progress to stderr and the summary to stdout. Exit status is 0
-on success, 1 on a library error, and 130 on interrupt.
+on success, 1 on a library error or when no query is answered, and 130 on
+interrupt. Partial query failures are reported individually and exit 0 with a
+warning.
 
 ## `openstage-write`
 
@@ -52,6 +54,11 @@ back, and optionally stores the settings record in flash.
 
 Every live write requires `--yes`; without it the command exits with status 2.
 Use `--json` for machine-readable output.
+
+A settings commit is all-or-nothing from the tool's point of view. If a write
+fails after an earlier step succeeded, the command names the failed step and
+reports that device state is unknown. A readback failure is reported separately
+and also exits nonzero, because the write may already have been applied.
 
 ### Common options
 
@@ -198,6 +205,12 @@ or a capture for offline review. A live session also serves the WFTNP endpoint,
 so a cycling app can ride against the same bike while the dashboard shows what
 it sends.
 
+At startup the dashboard verifies its dependencies and preflights the WFTNP
+port. Missing dependencies and unusable ports abort with a message. Scanning
+for a sleeping bike continues until it is found. A bike drop is retried with
+backoff while the WFTNP endpoint stays up; a Bluetooth adapter error aborts.
+An incompatible device is retried twice, then reported.
+
 ```sh
 openstage-tui
 openstage-tui --replay session.json
@@ -232,9 +245,12 @@ openstage-tui --replay session.json --snapshot 2 --json
 
 ### Main screen
 
-The dashboard subscribes to the control responses, button and brake, FTMS
-Indoor Bike Data, FTMS Status and CSC. A missing optional characteristic is
-logged and ignored. Only the control response characteristic is required.
+The dashboard requires the control service and response characteristic, the
+button and brake characteristics, and the FTMS feature, indoor-data, status and
+control-point characteristics. A missing required service or characteristic is
+an incompatible-device error. CSC is optional: if it is absent or cannot be
+enabled, cadence falls back to API/FTMS and the options pane says CSC is
+unavailable.
 
 On connect the dashboard selects simulation mode at 0.0 % grade so manual
 shifting works. ERG starts at 100 W and is capped at 500 W in the interface.

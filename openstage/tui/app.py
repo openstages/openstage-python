@@ -195,6 +195,11 @@ class OptionsScreen(ModalScreen[None]):
                 "Flash storage is off unless you check it.",
                 id="options-hint",
             )
+            if not self.state.csc_available:
+                yield Static(
+                    "CSC unavailable; cadence uses API/FTMS",
+                    id="options-csc",
+                )
             with Horizontal(classes="option-row"):
                 yield Label("power/cadence source", classes="option-label")
                 yield Select(
@@ -1164,6 +1169,7 @@ class DashApp(App[None]):
         self.state.identity = feed.identity
         self.state.mtu = feed.mtu
         self.state.status = feed.status
+        self.state.csc_available = feed.csc_available
         try:
             await feed.set_target_grade(0.0)
             self.log_lines.append("control: simulation at 0.0 % grade")

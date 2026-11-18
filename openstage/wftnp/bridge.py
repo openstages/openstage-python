@@ -216,8 +216,16 @@ class WftnpBridge:
         elif isinstance(record, pdu.GearNotification):
             await self._gear(record)
         elif isinstance(record, pdu.Battery):
-            if record.percent is not None and self._elite.set_battery(record.percent):
-                await self._emit(STATUS, self._elite.encode_status())
+            if record.percent is not None:
+                percent = max(0, min(100, record.percent))
+                if percent != record.percent:
+                    LOGGER.info(
+                        "clamped out-of-range battery report %s to %s",
+                        record.percent,
+                        percent,
+                    )
+                if self._elite.set_battery(percent):
+                    await self._emit(STATUS, self._elite.encode_status())
         elif note.stream is pdu.Stream.FTMS_DATA:
             self._ftms.indoor_bike_data = note.raw
             await self._emit(FTMS_INDOOR_BIKE_DATA, note.raw)
