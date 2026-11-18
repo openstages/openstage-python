@@ -64,8 +64,28 @@ class BikeNotFound(BikeError):
     """No SB20-shaped device was found, or the control service is absent."""
 
 
+class BikeIncompatibleError(BikeError):
+    """The connected device does not expose the required SB20 surface."""
+
+
 class BikeConnectionError(BikeError):
     """The transport is not connected or a write/read failed."""
+
+
+class BikeRadioError(BikeConnectionError):
+    """The Bluetooth adapter is unavailable, disabled or not permitted."""
+
+
+class BikeTransientError(BikeConnectionError):
+    """A connection failure that a fresh connection may recover from."""
+
+
+class BikeDisconnected(BikeTransientError):
+    """The BLE link dropped after a successful connection."""
+
+
+class BikeSubscriptionError(BikeTransientError):
+    """A required notification stream could not be enabled."""
 
 
 class BikeTimeout(BikeError):
@@ -182,6 +202,23 @@ class WriteResult:
     @property
     def persisted(self) -> bool:
         return self.store is not None and self.store.stored
+
+
+class SettingsCommitError(BikeError):
+    """A settings commit stopped before completing; device state is unknown."""
+
+    def __init__(
+        self,
+        step: str,
+        completed: tuple[WriteResult, ...] = (),
+        message: str | None = None,
+    ) -> None:
+        self.step = step
+        self.completed = completed
+        detail = message or f"{step} failed"
+        super().__init__(
+            f"{detail}; {len(completed)} earlier write(s) may have been applied"
+        )
 
 
 @dataclass(frozen=True, slots=True)
