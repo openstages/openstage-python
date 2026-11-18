@@ -26,7 +26,13 @@ from typing import Any
 
 from . import pdu
 from .cli import add_connection_arguments
-from .capture import Capture, CapturedExchange, CapturedFrame, load_capture
+from .capture import (
+    Capture,
+    CaptureFormatError,
+    CapturedExchange,
+    CapturedFrame,
+    load_capture,
+)
 from .client import BikeError, BikeFeed, SB20Client
 from .replay import ReplayClient
 from .state import BikeState
@@ -321,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         if options.replay:
             return asyncio.run(_run_replay(options))
         return asyncio.run(_run_live(options))
+    except CaptureFormatError as exc:
+        print(f"probe error: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
 

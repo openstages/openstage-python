@@ -24,6 +24,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Select, Static
 
+from ..capture import CaptureFormatError
 from ..client import (
     BikeError,
     BikeFeed,
@@ -1620,7 +1621,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    feed = _make_feed(options)
+    try:
+        feed = _make_feed(options)
+    except CaptureFormatError as exc:
+        print(f"openstage-tui: {exc}", file=sys.stderr)
+        return 1
     state = BikeState()
     log_lines: deque[str] = deque(maxlen=400)
     allow_telemetry = not options.no_telemetry
@@ -1651,7 +1656,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         app.run()
     except KeyboardInterrupt:
-        pass
+        return 130
     finally:
         for error in app.cleanup_errors:
             print(f"cleanup: {error}", file=sys.stderr)

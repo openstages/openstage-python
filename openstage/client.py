@@ -621,7 +621,7 @@ class BikeSettings:
         async def run(label: str, operation: Awaitable[Any]) -> Any:
             try:
                 return await operation
-            except BikeError as exc:
+            except (BikeError, ValueError) as exc:
                 raise SettingsCommitError(label, tuple(results), str(exc)) from exc
 
         if self._weight is not None:

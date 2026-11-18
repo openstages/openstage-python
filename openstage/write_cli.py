@@ -357,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         out = asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        return 130
     except SettingsCommitError as exc:
         print(f"write failed at {exc.step}: {exc}", file=sys.stderr)
         print("device state is unknown; verify it before retrying", file=sys.stderr)

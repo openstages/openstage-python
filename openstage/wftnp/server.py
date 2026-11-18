@@ -250,7 +250,11 @@ class WftnpServer:
         )
         try:
             if self.on_connect is not None:
-                await self.on_connect()
+                try:
+                    await self.on_connect()
+                except Exception:
+                    LOGGER.exception("%s: on_connect failed", self.name)
+                    return
             while True:
                 await self._handle_frame(await read_frame(reader))
         except asyncio.IncompleteReadError:
@@ -264,7 +268,10 @@ class WftnpServer:
                 self._subscriptions.clear()
                 self._writer = None
                 if self.on_disconnect is not None:
-                    await self.on_disconnect()
+                    try:
+                        await self.on_disconnect()
+                    except Exception:
+                        LOGGER.exception("%s: on_disconnect failed", self.name)
             writer.close()
             try:
                 await writer.wait_closed()
