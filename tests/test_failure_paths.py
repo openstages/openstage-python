@@ -32,7 +32,7 @@ from openstage.client import (
 from openstage.replay import ReplayClient
 from openstage.state import BikeState
 from openstage.transport import BleakTransport
-from openstage.tui.app import DashApp
+from openstage.tui.app import DashApp, LogScreen
 from textual.widgets import RichLog
 from openstage.wftnp import WftnpServer, WftnpStartError, preflight_port
 from openstage.wftnp.bridge import WftnpBridge
@@ -376,7 +376,7 @@ async def test_tui_aborts_on_radio_error() -> None:
         assert "Bluetooth adapter unavailable" in state.status
 
 
-async def test_tui_log_panel_fits_a_compact_terminal() -> None:
+async def test_tui_log_is_opened_on_demand() -> None:
     fixture = Path(__file__).parent / "fixtures" / "legacy" / "queries.json"
     feed = ReplayClient(fixture, speed=1000)
     app = DashApp(
@@ -388,9 +388,19 @@ async def test_tui_log_panel_fits_a_compact_terminal() -> None:
     async with app.run_test(size=(100, 24)) as pilot:
         await asyncio.sleep(0.2)
         await pilot.pause()
-        log = app.screen.query_one("#log", RichLog)
-        assert log.size.height >= 4
-        assert log.region.bottom <= app.size.height
+        assert len(app.screen.query("#log-view")) == 0
+        assert app.screen.query_one("#panels").size.height >= 12
+
+        await pilot.press("l")
+        await pilot.pause()
+        assert isinstance(app.screen, LogScreen)
+        view = app.screen.query_one("#log-view", RichLog)
+        assert view.size.height > 0
+        assert view.region.bottom <= app.size.height
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.screen.query("#log-view")) == 0
 
 
 async def test_tui_keeps_retrying_transient_failures() -> None:

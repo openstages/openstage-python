@@ -238,6 +238,7 @@ openstage-tui --replay session.json --snapshot 2 --json
 | `o` | Open the options pane. |
 | `g` or `d` | Open the drivetrain screen. |
 | `m` | Show button read-back and frame counters. |
+| `l` | Open the scrollable event log. |
 | `z` | Open the zero-reset overlay. |
 | `e` | Toggle ERG on or off. |
 | `+` / `-` | Change the ERG target by 10 W. |

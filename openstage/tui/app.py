@@ -80,6 +80,63 @@ from .panels import (
 )
 
 
+class LogScreen(ModalScreen[None]):
+    """Scrollable event history, opened on demand with ``l``."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("l", "close", "Close"),
+        Binding("q", "close", "Close"),
+        Binding("up", "scroll_up", "Scroll up", show=False),
+        Binding("down", "scroll_down", "Scroll down", show=False),
+        Binding("pageup", "page_up", "Page up", show=False),
+        Binding("pagedown", "page_down", "Page down", show=False),
+    ]
+
+    CSS = """
+    LogScreen { align: center middle; }
+    #log-panel {
+        width: 92%; height: 80%;
+        border: round $accent; background: $surface; padding: 0 1;
+    }
+    #log-title { text-style: bold; }
+    #log-view { height: 1fr; }
+    """
+
+    def __init__(self, log_lines: deque[str]) -> None:
+        super().__init__()
+        self.log_lines = log_lines
+
+    def compose(self) -> ComposeResult:
+        with Container(id="log-panel"):
+            yield Static("event log", id="log-title")
+            yield RichLog(id="log-view", max_lines=400, markup=False, wrap=True)
+
+    def on_mount(self) -> None:
+        view = self.query_one("#log-view", RichLog)
+        for line in self.log_lines:
+            view.write(line)
+        view.focus()
+
+    def _view(self) -> RichLog:
+        return self.query_one("#log-view", RichLog)
+
+    def action_scroll_up(self) -> None:
+        self._view().scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self._view().scroll_down()
+
+    def action_page_up(self) -> None:
+        self._view().scroll_page_up()
+
+    def action_page_down(self) -> None:
+        self._view().scroll_page_down()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class MoreDataScreen(ModalScreen[None]):
     """Rarely-changing detail: button configuration and frame counters."""
 
@@ -999,13 +1056,11 @@ class DashApp(App[None]):
         grid-columns: 1fr 1fr;
         grid-rows: 1fr 1fr;
         height: 1fr;
-        min-height: 0;
     }
     #panels > Static {
         width: 1fr; height: 100%;
         border: round $primary; padding: 0 1;
     }
-    #log { height: 1fr; min-height: 4; border: round $accent; padding: 0 1; }
     """
 
     BINDINGS = [
@@ -1015,6 +1070,7 @@ class DashApp(App[None]):
         Binding("g", "gearing", "Gearing"),
         Binding("d", "gearing", "Gearing", show=False),
         Binding("m", "more_data", "More data"),
+        Binding("l", "log", "Log"),
         Binding("z", "zero_reset", "Zero reset"),
         Binding("e", "toggle_erg", "ERG on/off"),
         Binding("plus", "erg_up", "ERG +10 W"),
@@ -1041,7 +1097,6 @@ class DashApp(App[None]):
         self._wftnp_port = DEFAULT_PORT if wftnp_port is None else wftnp_port
         self._bridge: WftnpBridge | None = None
         self._bridge_task: asyncio.Task[None] | None = None
-        self._logged = 0
         self._feed_task: asyncio.Task[None] | None = None
         self._status_task: asyncio.Task[None] | None = None
         self._main_screen: Screen[object] | None = None
@@ -1069,7 +1124,6 @@ class DashApp(App[None]):
             yield Static(id="status")
             yield Static(id="readback")
         yield Static(id="livebuttons")
-        yield RichLog(id="log", max_lines=400, markup=False, wrap=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1082,7 +1136,6 @@ class DashApp(App[None]):
             ("#status", "bike status"),
             ("#readback", "read-back (queries only, nothing set)"),
             ("#livebuttons", "handlebar controls (live, 0c46be60)"),
-            ("#log", "event log"),
         ):
             self.query_one(widget_id).border_title = title
         self._feed_task = asyncio.create_task(self._run_feed())
@@ -1392,21 +1445,16 @@ class DashApp(App[None]):
             main.query_one("#readback", Static).update(readback_panel(self.state))
             livebuttons = main.query_one("#livebuttons", Static)
             livebuttons.update(live_buttons_panel(self.state, livebuttons.size.width or main.size.width))
-
-            log = main.query_one("#log", RichLog)
         except NoMatches:
             return
-        if self._logged > len(self.log_lines):
-            self._logged = 0
-        new = list(self.log_lines)[self._logged:]
-        for line in new:
-            log.write(line)
-        self._logged += len(new)
 
     # ------------------------------------------------------------------ actions
 
     def action_more_data(self) -> None:
         self.push_screen(MoreDataScreen(self.state))
+
+    def action_log(self) -> None:
+        self.push_screen(LogScreen(self.log_lines))
 
     def action_options(self) -> None:
         self.push_screen(OptionsScreen(self.state, self.feed))
@@ -1543,10 +1591,9 @@ class DashApp(App[None]):
             self.log_lines.append(f"re-send failed: {exc}")
 
     def action_clear_log(self) -> None:
-        if self._main_screen is None:
-            return
-        self._main_screen.query_one("#log", RichLog).clear()
-        self._logged = len(self.log_lines)
+        self.log_lines.clear()
+        if isinstance(self.screen, LogScreen):
+            self.screen.query_one("#log-view", RichLog).clear()
 
     async def on_unmount(self) -> None:
         errors: list[str] = []
