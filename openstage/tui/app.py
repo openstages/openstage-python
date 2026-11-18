@@ -1171,6 +1171,8 @@ class DashApp(App[None]):
         self.state.mtu = feed.mtu
         self.state.status = feed.status
         self.state.csc_available = feed.csc_available
+        if self._reconnect_modal_open and isinstance(self.screen, ReconnectScreen):
+            self.pop_screen()
         try:
             await feed.set_target_grade(0.0)
             self.log_lines.append("control: simulation at 0.0 % grade")
