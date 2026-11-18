@@ -163,7 +163,7 @@ class _TuiTransport:
 
     @property
     def service_uuids(self) -> frozenset[str]:
-        return frozenset({uuids.API_SERVICE, uuids.FITNESS_MACHINE})
+        return frozenset({uuids.API_SERVICE, uuids.BUTTON_SERVICE, uuids.FITNESS_MACHINE})
 
     async def connect(self) -> None:
         self._connected = True

@@ -32,6 +32,11 @@ class Transport(Protocol):
     @property
     def service_uuids(self) -> frozenset[str]: ...
 
+    @property
+    def characteristic_uuids(self) -> frozenset[str]: ...
+
+    def set_disconnected_callback(self, callback: Callable[[], None] | None) -> None: ...
+
     async def connect(self) -> None: ...
 
     async def disconnect(self) -> None: ...
@@ -146,10 +151,29 @@ async def discover_bikes(
 class BleakTransport:
     """``Transport`` backed by a ``bleak`` central."""
 
-    def __init__(self, address_or_device: str | Any, *, timeout: float = 30.0) -> None:
-        self._client = BleakClient(address_or_device, timeout=timeout)
+    def __init__(
+        self,
+        address_or_device: str | Any,
+        *,
+        timeout: float = 30.0,
+        disconnected_callback: Callable[[], None] | None = None,
+    ) -> None:
+        self._disconnected_callback = disconnected_callback
+        self._client = BleakClient(
+            address_or_device,
+            timeout=timeout,
+            disconnected_callback=self._handle_disconnect,
+        )
         self._address = str(getattr(address_or_device, "address", address_or_device))
         self._notify_callbacks: dict[str, NotifyCallback] = {}
+
+    def set_disconnected_callback(self, callback: Callable[[], None] | None) -> None:
+        self._disconnected_callback = callback
+
+    def _handle_disconnect(self, _client: BleakClient) -> None:
+        callback, self._disconnected_callback = self._disconnected_callback, None
+        if callback is not None:
+            callback()
 
     @property
     def address(self) -> str:
@@ -174,6 +198,21 @@ class BleakTransport:
         except AttributeError:
             values = services
         return frozenset(uuids.normalize(str(getattr(service, "uuid", ""))) for service in values)
+
+    @property
+    def characteristic_uuids(self) -> frozenset[str]:
+        services = getattr(self._client, "services", None)
+        if services is None:
+            return frozenset()
+        values = getattr(services, "characteristics", None)
+        if values is None:
+            return frozenset()
+        if hasattr(values, "values"):
+            values = values.values()
+        return frozenset(
+            uuids.normalize(str(getattr(characteristic, "uuid", "")))
+            for characteristic in values
+        )
 
     async def connect(self) -> None:
         await self._client.connect()
