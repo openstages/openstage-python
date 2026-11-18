@@ -27,7 +27,10 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Rich
 from ..client import (
     BikeError,
     BikeFeed,
+    BikeIncompatibleError,
+    BikeRadioError,
     BikeSettings,
+    BikeTransientError,
     DrivetrainMode,
     GearPlan,
     GearSettings,
@@ -48,12 +51,17 @@ from ..wftnp import (
     DEFAULT_SERIAL,
     SERVICE,
     WftnpBridge,
+    WftnpStartError,
+    preflight_port,
 )
 
 BUTTON_DEBOUNCE_S = 0.04
 ERG_HOLD_DELAY_S = 0.5
 ERG_HOLD_REPEAT_S = 0.5
 ERG_TARGET_MAX_W = 500
+RECONNECT_MAX_DELAY_S = 30.0
+RECONNECT_MODAL_AFTER = 5
+INCOMPATIBLE_ATTEMPTS = 3
 
 
 from .panels import (
@@ -450,7 +458,7 @@ class ZeroResetScreen(ModalScreen[None]):
             self._finish(exc.result, heading="reset timed out (global)")
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except BikeError as exc:
             self._finish_error(str(exc))
 
     def _finish(self, result: pdu.ZeroReset, *, heading: str | None = None) -> None:
@@ -493,6 +501,54 @@ class ZeroResetScreen(ModalScreen[None]):
     async def on_unmount(self) -> None:
         if self._task is not None:
             self._task.cancel()
+
+
+class ReconnectScreen(ModalScreen[bool]):
+    """Non-blocking notice that the bike link is being retried."""
+
+    BINDINGS = [
+        Binding("escape", "retry", "Retry"),
+        Binding("r", "retry", "Retry"),
+        Binding("q", "quit", "Quit"),
+    ]
+
+    CSS = """
+    ReconnectScreen { align: center middle; }
+    #reconnect {
+        width: 72; height: auto;
+        border: round $warning; background: $surface; padding: 1 2;
+    }
+    #reconnect-message { margin-top: 1; }
+    #reconnect-actions { height: auto; margin-top: 1; }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Container(id="reconnect"):
+            yield Static("bike connection unavailable", id="reconnect-title")
+            yield Static(self.message, id="reconnect-message")
+            yield Static(
+                "The dashboard keeps retrying in the background.",
+                id="reconnect-note",
+            )
+            with Horizontal(id="reconnect-actions"):
+                yield Button("Retry", id="reconnect-retry", variant="primary")
+                yield Button("Quit", id="reconnect-quit")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "reconnect-quit":
+            self.dismiss(False)
+        else:
+            self.dismiss(True)
+
+    def action_retry(self) -> None:
+        self.dismiss(True)
+
+    def action_quit(self) -> None:
+        self.dismiss(False)
 
 
 class GearingScreen(ModalScreen[None]):
@@ -747,7 +803,7 @@ class GearingScreen(ModalScreen[None]):
         try:
             settings = self._selected_settings()
             return settings, settings.plan(), None
-        except (BikeError, ValueError, TypeError) as exc:
+        except (BikeError, ValueError) as exc:
             return None, None, str(exc)
 
     def _refresh_preview(self) -> None:
@@ -941,6 +997,7 @@ class DashApp(App[None]):
         *,
         allow_telemetry: bool,
         wftnp: bool = False,
+        wftnp_port: int | None = None,
     ) -> None:
         super().__init__()
         self.feed = feed
@@ -948,6 +1005,7 @@ class DashApp(App[None]):
         self.log_lines = log_lines
         self.allow_telemetry = allow_telemetry
         self._wftnp = wftnp
+        self._wftnp_port = DEFAULT_PORT if wftnp_port is None else wftnp_port
         self._bridge: WftnpBridge | None = None
         self._logged = 0
         self._feed_task: asyncio.Task[None] | None = None
@@ -958,6 +1016,13 @@ class DashApp(App[None]):
         self._button_state: set[int] = set()
         self._button_generation: dict[int, int] = {}
         self._button_tasks: set[asyncio.Task[None]] = set()
+        self._connected = False
+        self._reconnect_modal_open = False
+        self._cleanup_errors: list[str] = []
+
+    @property
+    def cleanup_errors(self) -> tuple[str, ...]:
+        return tuple(self._cleanup_errors)
 
     # ------------------------------------------------------------------ layout
 
@@ -992,76 +1057,166 @@ class DashApp(App[None]):
     # ------------------------------------------------------------------ data
 
     async def _run_feed(self) -> None:
-        feed = self.feed
         try:
-            await feed.connect()
-            self.state.identity = feed.identity
-            self.state.mtu = feed.mtu
-            self.state.status = feed.status
-            if isinstance(feed, SB20Client):
-                try:
-                    await feed.set_target_grade(0.0)
-                    self.log_lines.append("control: simulation at 0.0 % grade")
-                except Exception as exc:
-                    self.log_lines.append(f"initial simulation mode failed: {exc}")
-            boot_fragments: list[bytes] = []
-            def _collect_fragment(note: Notification) -> None:
-                if isinstance(note.record, pdu.GearMapFragment):
-                    boot_fragments.append(note.record.data)
-            if isinstance(feed, SB20Client):
-                feed.add_listener(_collect_fragment)
-            try:
-                results = await feed.query_all()
-            finally:
-                if isinstance(feed, SB20Client):
-                    feed.remove_listener(_collect_fragment)
-            self._ingest_sensor_sides(results)
-            if isinstance(feed, SB20Client):
-                message = await resync_drivetrain(
-                    feed, self.state, results, boot_fragments
-                )
-                if message is not None:
-                    self.log_lines.append(message)
-            if self.allow_telemetry and isinstance(feed, SB20Client):
-                await feed.open_telemetry(power=True, gearing=True)
-            if self._wftnp and isinstance(feed, SB20Client):
-                await self._start_bridge(feed)
-            if isinstance(feed, SB20Client):
-                self._status_task = asyncio.create_task(self._poll_status())
-            async for note in feed.notifications():
-                self.state.apply(note)
-                if self._bridge is not None:
-                    try:
-                        await self._bridge.handle(note)
-                    except Exception as exc:
-                        self.log_lines.append(f"wftnp: cannot forward a frame: {exc}")
-                if isinstance(note.record, pdu.ButtonFrame):
-                    self._on_button_frame()
-                self.log_lines.append(f"{note.stream.value}: {note.hex} -> "
-                                      f"{type(note.record).__name__}")
+            if isinstance(self.feed, SB20Client):
+                await self._run_live_feed()
+            else:
+                await self._run_replay_feed()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.state.status = f"error: {exc}"
-            self.log_lines.append(f"feed error: {exc}")
-        else:
-            self.state.status = feed.status
+            # Task boundary: let Textual render the traceback instead of
+            # flattening an unexpected bug into a log line.
+            self._handle_exception(exc)
+
+    async def _run_replay_feed(self) -> None:
+        feed = self.feed
+        await feed.connect()
+        self.state.identity = feed.identity
+        self.state.mtu = feed.mtu
+        self.state.status = feed.status
+        results = await feed.query_all()
+        self._ingest_sensor_sides(results)
+        async for note in feed.notifications():
+            await self._consume(note)
+        self.state.status = feed.status
+
+    async def _run_live_feed(self) -> None:
+        feed = self.feed
+        assert isinstance(feed, SB20Client)
+        failures = 0
+        incompatible = 0
+        while True:
+            try:
+                await feed.connect()
+            except BikeRadioError as exc:
+                self._fatal(f"Bluetooth adapter unavailable: {exc}")
+                return
+            except BikeIncompatibleError as exc:
+                incompatible += 1
+                if incompatible >= INCOMPATIBLE_ATTEMPTS:
+                    self._fatal(f"cannot use this device: {exc}")
+                    return
+                self._event(
+                    f"{exc}; retrying connection "
+                    f"({incompatible}/{INCOMPATIBLE_ATTEMPTS - 1})"
+                )
+                await asyncio.sleep(1.0)
+                continue
+            except BikeTransientError as exc:
+                failures += 1
+                self._event(f"connection failed: {exc}; retrying")
+                self.state.status = "reconnecting…"
+                if failures >= RECONNECT_MODAL_AFTER:
+                    self._show_reconnect_modal(str(exc))
+                await asyncio.sleep(self._backoff(failures))
+                continue
+            except BikeError as exc:
+                self._fatal(f"cannot connect to the bike: {exc}")
+                return
+
+            self._connected = True
+            failures = 0
+            incompatible = 0
+            try:
+                await self._after_connect(feed)
+                async for note in feed.notifications():
+                    await self._consume(note)
+            except WftnpStartError as exc:
+                self._connected = False
+                self._fatal(f"WFTNP endpoint failed: {exc}")
+                return
+            except BikeRadioError as exc:
+                self._connected = False
+                self._fatal(f"Bluetooth adapter unavailable: {exc}")
+                return
+            except BikeIncompatibleError as exc:
+                self._connected = False
+                incompatible += 1
+                if incompatible >= INCOMPATIBLE_ATTEMPTS:
+                    self._fatal(f"cannot use this device: {exc}")
+                    return
+                self._event(
+                    f"{exc}; retrying connection "
+                    f"({incompatible}/{INCOMPATIBLE_ATTEMPTS - 1})"
+                )
+                await asyncio.sleep(1.0)
+                continue
+            except BikeTransientError as exc:
+                self._connected = False
+                failures += 1
+                self._event(f"bike link lost: {exc}; reconnecting")
+                self.state.status = "reconnecting…"
+                if failures >= RECONNECT_MODAL_AFTER:
+                    self._show_reconnect_modal(str(exc))
+                await asyncio.sleep(self._backoff(failures))
+                continue
+            except BikeError as exc:
+                self._connected = False
+                self._fatal(f"bike error: {exc}")
+                return
+            else:
+                self._connected = False
+                return
+
+    async def _after_connect(self, feed: SB20Client) -> None:
+        self.state.identity = feed.identity
+        self.state.mtu = feed.mtu
+        self.state.status = feed.status
+        try:
+            await feed.set_target_grade(0.0)
+            self.log_lines.append("control: simulation at 0.0 % grade")
+        except BikeError as exc:
+            self.log_lines.append(f"initial simulation mode failed: {exc}")
+
+        boot_fragments: list[bytes] = []
+
+        def _collect_fragment(note: Notification) -> None:
+            if isinstance(note.record, pdu.GearMapFragment):
+                boot_fragments.append(note.record.data)
+
+        feed.add_listener(_collect_fragment)
+        try:
+            results = await feed.query_all()
+        finally:
+            feed.remove_listener(_collect_fragment)
+        self._ingest_sensor_sides(results)
+        message = await resync_drivetrain(feed, self.state, results, boot_fragments)
+        if message is not None:
+            self.log_lines.append(message)
+        if self.allow_telemetry:
+            await feed.open_telemetry(power=True, gearing=True)
+        if self._wftnp and self._bridge is None:
+            await self._start_bridge(feed)
+        if self._status_task is None or self._status_task.done():
+            self._status_task = asyncio.create_task(self._poll_status())
+
+    async def _consume(self, note: Notification) -> None:
+        self.state.apply(note)
+        if self._bridge is not None:
+            try:
+                await self._bridge.handle(note)
+            except BikeError as exc:
+                self.log_lines.append(f"wftnp: cannot forward a frame: {exc}")
+        if isinstance(note.record, pdu.ButtonFrame):
+            self._on_button_frame()
+        self.log_lines.append(
+            f"{note.stream.value}: {note.hex} -> {type(note.record).__name__}"
+        )
 
     async def _start_bridge(self, feed: SB20Client) -> None:
-        """Serve this connection to a cycling app on the standard port.
-
-        Apps remember the endpoint they last used, so the conventional port
-        keeps working across restarts. An ephemeral port is only a fallback
-        for when another bridge already holds it.
-        """
+        """Serve this connection to a cycling app on the chosen port."""
 
         txt = {
             "serial-number": feed.identity.serial or DEFAULT_SERIAL,
             "mac-address": DEFAULT_MAC,
             "ble-service-uuids": SERVICE,
         }
-        bridge: WftnpBridge | None = None
-        for port in (DEFAULT_PORT, 0):
+        candidates: tuple[int, ...] = (self._wftnp_port, 0)
+        if self._wftnp_port == 0:
+            candidates = (0,)
+        last_error: BaseException | None = None
+        for port in candidates:
             candidate = WftnpBridge(
                 feed,
                 name=DEFAULT_NAME,
@@ -1072,31 +1227,63 @@ class DashApp(App[None]):
             try:
                 await candidate.start()
             except OSError as exc:
+                last_error = exc
                 self.log_lines.append(f"wftnp: port {port} unavailable: {exc}")
                 continue
             except Exception as exc:
-                self.log_lines.append(f"wftnp: cannot start the endpoint: {exc}")
-                return
-            bridge = candidate
-            break
-        if bridge is None:
+                await self._stop_bridge(candidate)
+                raise WftnpStartError(
+                    f"cannot start the endpoint: {exc}"
+                ) from exc
+            self._bridge = candidate
+            self.log_lines.append(
+                f"wftnp: serving {DEFAULT_NAME} on port {candidate.server.port}"
+            )
             return
-        self._bridge = bridge
-        self.log_lines.append(
-            f"wftnp: serving {DEFAULT_NAME} on port {bridge.server.port}"
-        )
+        raise WftnpStartError(f"cannot bind the WFTNP endpoint: {last_error}")
+
+    async def _stop_bridge(self, bridge: WftnpBridge) -> None:
+        try:
+            await bridge.stop()
+        except Exception as exc:
+            self.log_lines.append(f"wftnp: cleanup failed: {exc}")
 
     async def _poll_status(self) -> None:
         assert isinstance(self.feed, SB20Client)
         while True:
             await asyncio.sleep(2.0)
+            if not self._connected:
+                continue
             try:
                 await self.feed.get_bike_status()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except BikeError as exc:
                 self.log_lines.append(f"bike status poll failed: {exc}")
-                return
+
+    @staticmethod
+    def _backoff(failures: int) -> float:
+        return min(RECONNECT_MAX_DELAY_S, float(2 ** min(failures - 1, 5)))
+
+    def _event(self, message: str) -> None:
+        self.log_lines.append(message)
+
+    def _fatal(self, message: str) -> None:
+        self.state.status = message
+        self.log_lines.append(message)
+        self.exit(return_code=1, message=message)
+
+    def _show_reconnect_modal(self, message: str) -> None:
+        if self._reconnect_modal_open:
+            return
+        self._reconnect_modal_open = True
+
+        def closed(keep: bool | None) -> None:
+            self._reconnect_modal_open = False
+            if keep is False:
+                self._fatal("bike connection unavailable; exiting")
+
+        self.push_screen(ReconnectScreen(message), closed)
 
     def _ingest_sensor_sides(self, results: dict[str, Any]) -> None:
         left = results.get("sensor_firmware_left")
@@ -1186,7 +1373,7 @@ class DashApp(App[None]):
                 await self.feed.erg_on(self._erg_target_w)
                 self._erg_on = True
                 self.log_lines.append(f"control: ERG on at {self._erg_target_w} W")
-        except Exception as exc:
+        except BikeError as exc:
             self.log_lines.append(f"ERG toggle failed: {exc}")
 
     async def action_erg_up(self) -> None:
@@ -1205,7 +1392,7 @@ class DashApp(App[None]):
             return
         try:
             await self.feed.set_target_power(target)
-        except Exception as exc:
+        except BikeError as exc:
             self.log_lines.append(f"ERG target change failed: {exc}")
             return
         self._erg_target_w = target
@@ -1283,7 +1470,7 @@ class DashApp(App[None]):
     async def action_resend(self) -> None:
         try:
             await self.feed.query_all()
-        except Exception as exc:
+        except BikeError as exc:
             self.log_lines.append(f"re-send failed: {exc}")
 
     def action_clear_log(self) -> None:
@@ -1293,22 +1480,36 @@ class DashApp(App[None]):
         self._logged = len(self.log_lines)
 
     async def on_unmount(self) -> None:
-        for task in self._button_tasks:
-            task.cancel()
+        errors: list[str] = []
+        tasks = list(self._button_tasks)
         if self._status_task is not None:
-            self._status_task.cancel()
+            tasks.append(self._status_task)
+            self._status_task = None
         if self._feed_task is not None:
-            self._feed_task.cancel()
+            tasks.append(self._feed_task)
+            self._feed_task = None
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                errors.append(f"task: {exc}")
         if self._bridge is not None:
             try:
                 await self._bridge.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(f"wftnp: {exc}")
             self._bridge = None
         try:
             await self.feed.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"feed close: {exc}")
+        for error in getattr(self.feed, "cleanup_errors", ()):
+            errors.append(f"feed cleanup: {error}")
+        self._cleanup_errors.extend(errors)
 
 
 # --------------------------------------------------------------------------- headless
@@ -1317,13 +1518,10 @@ class DashApp(App[None]):
 def screen_text(app: App[Any]) -> str:
     """Render the live screen to plain text for ``--snapshot`` and tests."""
 
-    try:
-        if isinstance(app, DashApp):
-            app._refresh()
-        strips = app.screen._compositor.render_strips()
-        return "\n".join(strip.text.rstrip() for strip in strips).rstrip()
-    except Exception as exc:  # pragma: no cover - defensive
-        return f"(text export unavailable: {exc})"
+    if isinstance(app, DashApp):
+        app._refresh()
+    strips = app.screen._compositor.render_strips()
+    return "\n".join(strip.text.rstrip() for strip in strips).rstrip()
 
 
 def run_snapshot(
@@ -1340,7 +1538,10 @@ def run_snapshot(
         async with app.run_test(size=size) as pilot:
             await asyncio.sleep(seconds)
             await pilot.pause()
-            return screen_text(app)
+            text = screen_text(app)
+        for error in app.cleanup_errors:
+            print(f"cleanup: {error}", file=sys.stderr)
+        return text
 
     return asyncio.run(go())
 
@@ -1394,6 +1595,17 @@ def main(argv: list[str] | None = None) -> int:
             datefmt="%H:%M:%S",
         )
 
+    wftnp_port: int | None = None
+    if options.snapshot is None and options.replay is None and not options.no_wftnp:
+        try:
+            wftnp_port = asyncio.run(preflight_port(DEFAULT_PORT))
+        except Exception as exc:
+            print(
+                f"openstage-tui: WFTNP preflight failed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
     feed = _make_feed(options)
     state = BikeState()
     log_lines: deque[str] = deque(maxlen=400)
@@ -1414,19 +1626,21 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(summary(state), indent=1))
         return 0
 
+    app = DashApp(
+        feed,
+        state,
+        log_lines,
+        allow_telemetry=allow_telemetry,
+        wftnp=not options.no_wftnp,
+        wftnp_port=wftnp_port,
+    )
     try:
-        DashApp(
-            feed,
-            state,
-            log_lines,
-            allow_telemetry=allow_telemetry,
-            wftnp=not options.no_wftnp,
-        ).run()
+        app.run()
     except KeyboardInterrupt:
         pass
-    except Exception as exc:
-        print(f"dashboard error: {exc}", file=sys.stderr)
-        return 1
+    finally:
+        for error in app.cleanup_errors:
+            print(f"cleanup: {error}", file=sys.stderr)
     return 0
 
 

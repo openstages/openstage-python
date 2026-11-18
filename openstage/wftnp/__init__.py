@@ -51,6 +51,8 @@ from .server import (
     GattService,
     WriteRejected,
     WftnpServer,
+    WftnpStartError,
+    preflight_port,
 )
 
 __all__ = [
@@ -77,7 +79,9 @@ __all__ = [
     "WftnpBridge",
     "WftnpDependencyError",
     "WftnpServer",
+    "WftnpStartError",
     "WriteRejected",
+    "preflight_port",
     "elite_button",
     "notification",
     "read_frame",

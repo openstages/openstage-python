@@ -35,6 +35,41 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT: Final = 36866
 
+
+class WftnpStartError(RuntimeError):
+    """The WFTNP endpoint cannot be started on this host."""
+
+
+async def _reject_connection(
+    _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    writer.close()
+    await writer.wait_closed()
+
+
+async def preflight_port(preferred: int = DEFAULT_PORT) -> int:
+    """Verify that a TCP listener can bind, returning the chosen port."""
+
+    last_error: BaseException | None = None
+    for candidate in dict.fromkeys((preferred, 0)):
+        try:
+            server = await asyncio.start_server(
+                _reject_connection, host="0.0.0.0", port=candidate
+            )
+        except OSError as exc:
+            last_error = exc
+            continue
+        try:
+            sockets = server.sockets or ()
+            return int(sockets[0].getsockname()[1])
+        finally:
+            server.close()
+            await server.wait_closed()
+    raise WftnpStartError(
+        f"cannot bind 0.0.0.0:{preferred} or an ephemeral fallback: {last_error}"
+    )
+
+
 ReadHandler = Callable[[], bytes]
 WriteHandler = Callable[[bytes], Awaitable[None]]
 SessionHandler = Callable[[], Awaitable[None]]
