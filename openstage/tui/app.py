@@ -30,6 +30,7 @@ from ..client import (
     BikeIncompatibleError,
     BikeRadioError,
     BikeSettings,
+    BikeSubscriptionError,
     BikeTransientError,
     DrivetrainMode,
     GearPlan,
@@ -1184,8 +1185,15 @@ class DashApp(App[None]):
         message = await resync_drivetrain(feed, self.state, results, boot_fragments)
         if message is not None:
             self.log_lines.append(message)
+        if self._wftnp:
+            try:
+                await feed.subscribe_gearing()
+            except BikeError as exc:
+                raise BikeSubscriptionError(
+                    f"cannot subscribe to bike gearing: {exc}"
+                ) from exc
         if self.allow_telemetry:
-            await feed.open_telemetry(power=True, gearing=True)
+            await feed.open_telemetry(power=True, gearing=not self._wftnp)
         if self._wftnp and self._bridge is None:
             await self._start_bridge(feed)
         if self._status_task is None or self._status_task.done():

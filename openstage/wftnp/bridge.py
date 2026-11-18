@@ -20,7 +20,15 @@ import logging
 from collections.abc import Mapping
 
 from .. import pdu
-from ..client import BikeError, Notification, SB20Client
+from ..client import (
+    BikeError,
+    BikeIncompatibleError,
+    BikeRadioError,
+    BikeSubscriptionError,
+    BikeTransientError,
+    Notification,
+    SB20Client,
+)
 from ..gearing_data import resync_drivetrain
 from ..state import BikeState
 from ..uuids import FTMS_CONTROL_POINT, FTMS_INDOOR_BIKE_DATA, FTMS_STATUS
@@ -105,14 +113,17 @@ class WftnpBridge:
                 try:
                     await self._client.subscribe_gearing()
                 except BikeError as exc:
-                    LOGGER.warning("cannot subscribe to bike gearing: %s", exc)
+                    raise BikeSubscriptionError(
+                        f"cannot subscribe to bike gearing: {exc}"
+                    ) from exc
         await self._server.start()
         if self._standalone:
             self._pump = asyncio.create_task(self._run(), name="wftnp-bike-pump")
 
     async def stop(self) -> None:
-        """Stop mirroring and close the endpoint."""
+        """Stop mirroring and close the endpoint, attempting both."""
 
+        errors: list[str] = []
         pump, self._pump = self._pump, None
         if pump is not None:
             pump.cancel()
@@ -120,7 +131,14 @@ class WftnpBridge:
                 await pump
             except asyncio.CancelledError:
                 pass
-        await self._server.stop()
+            except Exception as exc:
+                errors.append(f"pump: {exc}")
+        try:
+            await self._server.stop()
+        except Exception as exc:
+            errors.append(f"server: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     async def _resync_drivetrain(self) -> None:
         """Re-apply the preset stored in flash, as the TUI does on connect.
@@ -148,11 +166,44 @@ class WftnpBridge:
             LOGGER.info("%s", message)
 
     async def _run(self) -> None:
-        async for note in self._client.notifications():
+        while True:
             try:
-                await self.handle(note)
-            except Exception:
-                LOGGER.exception("cannot forward a bike notification")
+                async for note in self._client.notifications():
+                    try:
+                        await self.handle(note)
+                    except Exception:
+                        LOGGER.exception("cannot forward a bike notification")
+                return
+            except asyncio.CancelledError:
+                raise
+            except BikeTransientError as exc:
+                LOGGER.warning("bike link lost: %s; reconnecting", exc)
+                if not await self._reconnect():
+                    return
+            except (BikeRadioError, BikeIncompatibleError) as exc:
+                LOGGER.error("bike unavailable; bridge keeps stale state: %s", exc)
+                return
+
+    async def _reconnect(self) -> bool:
+        delay = 1.0
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                await self._client.connect()
+                if isinstance(self._client, SB20Client):
+                    await self._client.subscribe_gearing()
+                await self._resync_drivetrain()
+                LOGGER.info("bike reconnected; WFTNP endpoint resumed")
+                return True
+            except (BikeRadioError, BikeIncompatibleError) as exc:
+                LOGGER.error("cannot reconnect to the bike: %s", exc)
+                return False
+            except BikeTransientError as exc:
+                LOGGER.warning("reconnect failed: %s; retrying", exc)
+                delay = min(30.0, delay * 2.0)
+            except BikeError as exc:
+                LOGGER.error("cannot reconnect to the bike: %s", exc)
+                return False
 
     async def handle(self, note: Notification) -> None:
         """Mirror one bike notification into the endpoint."""

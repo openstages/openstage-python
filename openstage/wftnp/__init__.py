@@ -21,6 +21,8 @@ except ModuleNotFoundError as exc:
         "'pip install openstage[wftnp]' or 'pip install zeroconf'"
     ) from exc
 
+from .mdns import AdvertisementError
+
 from .elite import (
     BUTTONS,
     SERVICE,
@@ -56,6 +58,7 @@ from .server import (
 )
 
 __all__ = [
+    "AdvertisementError",
     "BUTTONS",
     "DEFAULT_MAC",
     "DEFAULT_NAME",

@@ -1818,12 +1818,12 @@ class SB20Client:
         self._telemetry.discard("gearing")
 
     async def open_telemetry(self, *, power: bool = True, gearing: bool = True) -> None:
-        if power:
+        if power and "power" not in self._telemetry:
             try:
                 await self.subscribe_power_data()
             except BikeError as exc:
                 self._note(f"power subscription failed: {exc}")
-        if gearing:
+        if gearing and "gearing" not in self._telemetry:
             try:
                 await self.subscribe_gearing()
             except BikeError as exc:
