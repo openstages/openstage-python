@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import warnings
 from collections import deque
 from collections.abc import Callable
@@ -607,6 +608,9 @@ class GearingScreen(ModalScreen[None]):
         self._status_kind = "apply"
         self._applied_plan: GearPlan | None = None
         self._data_error: str | None = None
+        self._busy_started: float | None = None
+        self._busy_label = ""
+        self._busy_timer: Any = None
         try:
             self._front_sets = load_front_rings()
             self._cassette_sets = load_cassettes()
@@ -849,8 +853,19 @@ class GearingScreen(ModalScreen[None]):
         preview.update("\n".join(lines))
         apply_button.disabled = not self._live or self._busy
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, label: str | None = None) -> None:
         self._busy = busy
+        if busy:
+            self._busy_label = label or "working"
+            self._busy_started = time.monotonic()
+            if self._busy_timer is None:
+                self._busy_timer = self.set_interval(1.0, self._tick_busy)
+        else:
+            if self._busy_timer is not None:
+                self._busy_timer.stop()
+                self._busy_timer = None
+            self._busy_started = None
+            self._busy_label = ""
         if not self.is_mounted:
             return
         self.query_one("#gear-close", Button).disabled = busy
@@ -859,11 +874,20 @@ class GearingScreen(ModalScreen[None]):
         if not busy:
             self._refresh_preview()
 
+    def _tick_busy(self) -> None:
+        if not self._busy or self._busy_started is None or not self.is_mounted:
+            return
+        elapsed = int(time.monotonic() - self._busy_started)
+        text = f"{self._busy_label}… {elapsed}s"
+        if "flash" in self._busy_label:
+            text += " (bike may take up to 240s)"
+        self._status(text, kind="preview")
+
     async def _apply_settings(self, settings: GearSettings, label: str) -> None:
         if not self._live or self._busy:
             return
         assert isinstance(self.feed, SB20Client)
-        self._set_busy(True)
+        self._set_busy(True, "applying to RAM")
         try:
             self._status(f"applying {label} to RAM…")
             if self._on_simulation is not None:
@@ -891,7 +915,7 @@ class GearingScreen(ModalScreen[None]):
         if not self._live or self._busy:
             return
         assert isinstance(self.feed, SB20Client)
-        self._set_busy(True)
+        self._set_busy(True, "storing to flash")
         try:
             self._status("storing applied map to flash (no API traffic)…")
             result = await self.feed.store_gearing()

@@ -18,6 +18,7 @@ import openstage.write_cli as write_cli
 from openstage import pdu, uuids
 from openstage.capture import FORMAT, CaptureFormatError, load_capture
 from openstage.client import (
+    BikeConnectionError,
     BikeDisconnected,
     BikeIdentity,
     BikeIncompatibleError,
@@ -204,6 +205,24 @@ async def test_cleanup_attempts_stop_and_disconnect() -> None:
 
     assert transport.disconnect_count == 1
     assert any("stop api notifications" in error for error in client.cleanup_errors)
+
+
+class _HangingWrite(_Transport):
+    async def write_characteristic(self, uuid: str, data: bytes) -> None:
+        await asyncio.sleep(5)
+
+
+async def test_store_write_timeout_does_not_hold_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("openstage.client._WRITE_TIMEOUT_S", 0.05)
+    client = _client(_HangingWrite())
+    await client.connect()
+
+    with pytest.raises(BikeConnectionError, match="write failed"):
+        await asyncio.wait_for(client.store_gearing(), timeout=1.0)
+
+    await client.close()
 
 
 async def test_store_failure_reports_the_completed_set() -> None:

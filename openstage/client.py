@@ -241,6 +241,7 @@ class SettingsCommit:
 _GEARING_FRAGMENT_GAP_S = 0.02
 _CLEANUP_TIMEOUT_S = 5.0
 _CONNECTIVITY_POLL_S = 1.0
+_WRITE_TIMEOUT_S = 5.0
 _LOGGER = logging.getLogger(__name__)
 
 _API_CHARACTERISTICS = frozenset({uuids.API_REQUEST, uuids.API_RESPONSE})
@@ -1337,8 +1338,11 @@ class SB20Client:
             raise BikeConnectionError("not connected")
         async with self._request_lock:
             try:
-                await transport.write_characteristic(
-                    uuids.FTMS_CONTROL_POINT, bytes(value)
+                await asyncio.wait_for(
+                    transport.write_characteristic(
+                        uuids.FTMS_CONTROL_POINT, bytes(value)
+                    ),
+                    timeout=_WRITE_TIMEOUT_S,
                 )
             except Exception as exc:
                 raise BikeConnectionError(f"write failed: {exc}") from exc
@@ -1498,7 +1502,10 @@ class SB20Client:
         if transport is None or not transport.is_connected:
             raise BikeConnectionError("not connected")
         try:
-            await transport.write_characteristic(uuids.API_REQUEST, data)
+            await asyncio.wait_for(
+                transport.write_characteristic(uuids.API_REQUEST, data),
+                timeout=_WRITE_TIMEOUT_S,
+            )
         except Exception as exc:
             raise BikeConnectionError(f"write failed: {exc}") from exc
 
