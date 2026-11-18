@@ -29,9 +29,11 @@ from openstage.client import (
     SB20Client,
     SettingsCommitError,
 )
+from openstage.replay import ReplayClient
 from openstage.state import BikeState
 from openstage.transport import BleakTransport
 from openstage.tui.app import DashApp
+from textual.widgets import RichLog
 from openstage.wftnp import WftnpServer, WftnpStartError, preflight_port
 from openstage.wftnp.bridge import WftnpBridge
 from openstage.wftnp.mdns import Advertisement
@@ -372,6 +374,23 @@ async def test_tui_aborts_on_radio_error() -> None:
         assert app.is_running is False
         assert app.return_code == 1
         assert "Bluetooth adapter unavailable" in state.status
+
+
+async def test_tui_log_panel_fits_a_compact_terminal() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "legacy" / "queries.json"
+    feed = ReplayClient(fixture, speed=1000)
+    app = DashApp(
+        feed,
+        BikeState(),
+        deque(maxlen=100),
+        allow_telemetry=False,
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+        log = app.screen.query_one("#log", RichLog)
+        assert log.size.height >= 4
+        assert log.region.bottom <= app.size.height
 
 
 async def test_tui_keeps_retrying_transient_failures() -> None:

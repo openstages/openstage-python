@@ -14,7 +14,7 @@ import sys
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from textual import events
@@ -65,6 +65,7 @@ ERG_TARGET_MAX_W = 500
 RECONNECT_MAX_DELAY_S = 30.0
 RECONNECT_MODAL_AFTER = 5
 INCOMPATIBLE_ATTEMPTS = 3
+BRIDGE_START_TIMEOUT_S = 10.0
 
 
 from .panels import (
@@ -996,8 +997,9 @@ class DashApp(App[None]):
         layout: grid;
         grid-size: 2 2;
         grid-columns: 1fr 1fr;
-        grid-rows: auto auto;
-        height: auto;
+        grid-rows: 1fr 1fr;
+        height: 1fr;
+        min-height: 0;
     }
     #panels > Static {
         width: 1fr; height: 100%;
@@ -1038,6 +1040,7 @@ class DashApp(App[None]):
         self._wftnp = wftnp
         self._wftnp_port = DEFAULT_PORT if wftnp_port is None else wftnp_port
         self._bridge: WftnpBridge | None = None
+        self._bridge_task: asyncio.Task[None] | None = None
         self._logged = 0
         self._feed_task: asyncio.Task[None] | None = None
         self._status_task: asyncio.Task[None] | None = None
@@ -1219,18 +1222,40 @@ class DashApp(App[None]):
         if message is not None:
             self.log_lines.append(message)
         if self._wftnp:
-            try:
-                await feed.subscribe_gearing()
-            except BikeError as exc:
-                raise BikeSubscriptionError(
-                    f"cannot subscribe to bike gearing: {exc}"
-                ) from exc
+            await self._require_subscription(feed.subscribe_gearing, "gearing")
         if self.allow_telemetry:
-            await feed.open_telemetry(power=True, gearing=not self._wftnp)
-        if self._wftnp and self._bridge is None:
-            await self._start_bridge(feed)
+            await self._require_subscription(feed.subscribe_power_data, "power")
+            if not self._wftnp:
+                await self._require_subscription(feed.subscribe_gearing, "gearing")
+        if self._wftnp and self._bridge is None and self._bridge_task is None:
+            self._bridge_task = asyncio.create_task(self._start_bridge_task(feed))
         if self._status_task is None or self._status_task.done():
             self._status_task = asyncio.create_task(self._poll_status())
+
+    async def _require_subscription(
+        self, operation: Callable[[], Awaitable[None]], label: str
+    ) -> None:
+        try:
+            await operation()
+        except BikeError as exc:
+            raise BikeSubscriptionError(
+                f"cannot subscribe to {label}: {exc}"
+            ) from exc
+        self.log_lines.append(f"telemetry: {label} subscribed")
+
+    async def _start_bridge_task(self, feed: SB20Client) -> None:
+        try:
+            await asyncio.wait_for(
+                self._start_bridge(feed), timeout=BRIDGE_START_TIMEOUT_S
+            )
+        except asyncio.CancelledError:
+            raise
+        except WftnpStartError as exc:
+            self._fatal(f"WFTNP endpoint failed: {exc}")
+        except Exception as exc:
+            self._fatal(f"WFTNP endpoint failed: {exc}")
+        finally:
+            self._bridge_task = None
 
     async def _consume(self, note: Notification) -> None:
         self.state.apply(note)
@@ -1271,6 +1296,9 @@ class DashApp(App[None]):
                 last_error = exc
                 self.log_lines.append(f"wftnp: port {port} unavailable: {exc}")
                 continue
+            except asyncio.CancelledError:
+                await self._stop_bridge(candidate)
+                raise
             except Exception as exc:
                 await self._stop_bridge(candidate)
                 raise WftnpStartError(
@@ -1529,6 +1557,9 @@ class DashApp(App[None]):
         if self._feed_task is not None:
             tasks.append(self._feed_task)
             self._feed_task = None
+        if self._bridge_task is not None:
+            tasks.append(self._bridge_task)
+            self._bridge_task = None
         for task in tasks:
             task.cancel()
         for task in tasks:
