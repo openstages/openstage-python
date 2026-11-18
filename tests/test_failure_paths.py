@@ -29,6 +29,7 @@ from openstage.client import (
     SettingsCommitError,
 )
 from openstage.state import BikeState
+from openstage.transport import BleakTransport
 from openstage.tui.app import DashApp
 from openstage.wftnp import WftnpServer, WftnpStartError, preflight_port
 from openstage.wftnp.bridge import WftnpBridge
@@ -166,6 +167,34 @@ async def test_disconnect_wakes_notification_consumer() -> None:
     await client.close()
 
 
+async def test_notifications_detect_a_missed_disconnect_callback() -> None:
+    transport = _Transport()
+    client = _client(transport)
+    await client.connect()
+
+    transport._connected = False
+    iterator = client.notifications()
+    with pytest.raises(BikeDisconnected):
+        await asyncio.wait_for(anext(iterator), timeout=2.0)
+    await iterator.aclose()
+    await client.close()
+
+
+async def test_disconnect_clears_subscriptions_before_cleanup() -> None:
+    transport = _Transport()
+    client = _client(transport)
+    await client.connect()
+    assert transport.disconnected_callback is not None
+
+    transport._connected = False
+    transport.disconnected_callback()
+    assert client._started == {}
+
+    await client.close()
+    assert client.cleanup_errors == ()
+    assert transport.stop_attempts == []
+
+
 async def test_cleanup_attempts_stop_and_disconnect() -> None:
     transport = _Transport(fail_stop=True)
     client = _client(transport)
@@ -191,6 +220,15 @@ async def test_store_failure_reports_the_completed_set() -> None:
     assert len(caught.value.completed) == 1
     assert "may have been applied" in str(caught.value)
     await client.close()
+
+
+def test_transport_disconnect_callback_is_reusable() -> None:
+    calls: list[int] = []
+    transport = BleakTransport.__new__(BleakTransport)
+    transport._disconnected_callback = lambda: calls.append(1)  # type: ignore[attr-defined]
+    transport._handle_disconnect(object())  # type: ignore[arg-type]
+    transport._handle_disconnect(object())  # type: ignore[arg-type]
+    assert calls == [1, 1]
 
 
 def test_capture_rejects_malformed_frame(tmp_path: Path) -> None:

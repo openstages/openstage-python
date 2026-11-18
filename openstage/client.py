@@ -240,6 +240,7 @@ class SettingsCommit:
 
 _GEARING_FRAGMENT_GAP_S = 0.02
 _CLEANUP_TIMEOUT_S = 5.0
+_CONNECTIVITY_POLL_S = 1.0
 _LOGGER = logging.getLogger(__name__)
 
 _API_CHARACTERISTICS = frozenset({uuids.API_REQUEST, uuids.API_RESPONSE})
@@ -833,7 +834,11 @@ class SB20Client:
 
         if self._closed:
             raise BikeConnectionError("client is closed; create a new SB20Client")
-        if self._transport is not None and self._transport.is_connected:
+        if (
+            self._transport is not None
+            and self._transport.is_connected
+            and self._disconnect_reason is None
+        ):
             return
 
         self._disconnect_reason = None
@@ -978,7 +983,7 @@ class SB20Client:
             self._closing = False
             self._cleanup_errors = tuple(errors)
             for error in errors:
-                _LOGGER.warning("cleanup: %s", error)
+                _LOGGER.debug("cleanup: %s", error)
 
     async def __aenter__(self) -> SB20Client:
         await self.connect()
@@ -1024,17 +1029,25 @@ class SB20Client:
             self._status = "not connected"
             self._closing = False
             for error in errors:
-                _LOGGER.warning("connect cleanup: %s", error)
+                _LOGGER.debug("connect cleanup: %s", error)
 
     def _on_transport_disconnect(self) -> None:
-        """Wake every waiter when the BLE link drops."""
+        """Wake every waiter when the BLE link drops.
 
-        if self._closed or self._closing or self._disconnect_reason is not None:
+        This is idempotent for status and error reporting, but it always
+        clears the live subscription set and wakes the notification consumer.
+        A repeated callback must not be ignored just because an earlier one
+        already set ``_disconnect_reason``.
+        """
+
+        if self._closed or self._closing:
             return
-        reason = BikeDisconnected("BLE link dropped")
-        self._disconnect_reason = reason
-        self._status = "disconnected"
-        self._note("BLE link dropped")
+        reason = self._disconnect_reason
+        if reason is None:
+            reason = BikeDisconnected("BLE link dropped")
+            self._disconnect_reason = reason
+            self._status = "disconnected"
+            self._note("BLE link dropped")
         pending = self._pending
         if pending is not None and not pending.future.done():
             pending.future.set_exception(reason)
@@ -1116,7 +1129,17 @@ class SB20Client:
         """
 
         while True:
-            item = await self._queue.get()
+            try:
+                item = await asyncio.wait_for(
+                    self._queue.get(), timeout=_CONNECTIVITY_POLL_S
+                )
+            except TimeoutError:
+                transport = self._transport
+                if transport is not None and not transport.is_connected:
+                    # Some backends miss the disconnect callback. Polling the
+                    # link makes the recovery path independent of that event.
+                    self._on_transport_disconnect()
+                continue
             if item is None:
                 reason, self._disconnect_reason = self._disconnect_reason, None
                 if reason is not None:

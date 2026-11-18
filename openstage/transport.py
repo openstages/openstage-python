@@ -171,7 +171,7 @@ class BleakTransport:
         self._disconnected_callback = callback
 
     def _handle_disconnect(self, _client: BleakClient) -> None:
-        callback, self._disconnected_callback = self._disconnected_callback, None
+        callback = self._disconnected_callback
         if callback is not None:
             callback()
 
