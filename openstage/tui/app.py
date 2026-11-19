@@ -49,7 +49,6 @@ from ..state import API_POWER_SOURCE, FTMS_SOURCE, SOURCE_LABELS, BikeState
 from ..gearing_data import load_cassettes, load_front_rings, resync_drivetrain
 from ..wftnp import (
     DEFAULT_MAC,
-    DEFAULT_NAME,
     DEFAULT_PORT,
     DEFAULT_SERIAL,
     SERVICE,
@@ -1331,6 +1330,12 @@ class DashApp(App[None]):
             "mac-address": DEFAULT_MAC,
             "ble-service-uuids": SERVICE,
         }
+        # Rouvy only detects an Elite bridge when the name contains "Square";
+        # the bike's advertised name keeps multiple units distinguishable.
+        base = feed.identity.name or (
+            f"Stages Bike {feed.identity.serial or DEFAULT_SERIAL}"
+        )
+        name = base if "Square" in base else f"{base} Square"
         candidates: tuple[int, ...] = (self._wftnp_port, 0)
         if self._wftnp_port == 0:
             candidates = (0,)
@@ -1338,7 +1343,7 @@ class DashApp(App[None]):
         for port in candidates:
             candidate = WftnpBridge(
                 feed,
-                name=DEFAULT_NAME,
+                name=name,
                 txt=txt,
                 port=port,
                 standalone=False,
@@ -1359,7 +1364,7 @@ class DashApp(App[None]):
                 ) from exc
             self._bridge = candidate
             self.log_lines.append(
-                f"wftnp: serving {DEFAULT_NAME} on port {candidate.server.port}"
+                f"wftnp: serving {name} on port {candidate.server.port}"
             )
             return
         raise WftnpStartError(f"cannot bind the WFTNP endpoint: {last_error}")

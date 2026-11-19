@@ -776,6 +776,7 @@ async def test_dashboard_serves_the_bridge_when_asked(monkeypatch: Any) -> None:
         await asyncio.sleep(0.4)
         await pilot.pause()
         assert len(started) == 1
+        assert started[0].options["name"] == "Stages Bike 0071 Square"
         assert started[0].options["standalone"] is False
         assert started[0].options["port"] == DEFAULT_PORT
     assert len(stopped) == 1
