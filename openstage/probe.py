@@ -26,7 +26,13 @@ from typing import Any
 
 from . import pdu
 from .cli import add_connection_arguments
-from .capture import Capture, CapturedExchange, CapturedFrame, load_capture
+from .capture import (
+    Capture,
+    CaptureFormatError,
+    CapturedExchange,
+    CapturedFrame,
+    load_capture,
+)
 from .client import BikeError, BikeFeed, SB20Client
 from .replay import ReplayClient
 from .state import BikeState
@@ -103,12 +109,24 @@ async def _run_live(options: ProbeOptions) -> int:
               file=sys.stderr, flush=True)
 
         results = await client.query_all()
-        print(f"probe: queries complete ({len(results)})", file=sys.stderr, flush=True)
+        answered = sum(isinstance(value, pdu.Pdu) for value in results.values())
+        failed = len(results) - answered
+        print(
+            f"probe: queries complete ({answered}/{len(results)} answered)",
+            file=sys.stderr,
+            flush=True,
+        )
         for request in pdu.QUERY_REQUESTS:
             result = results.get(request.name)
             if isinstance(result, pdu.Pdu):
                 exchanges.append(CapturedExchange(request=request.pdu,
                                                   responses=(result.raw,)))
+            elif isinstance(result, Exception):
+                print(
+                    f"probe: query {request.name} failed: {result}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         if options.telemetry and options.seconds > 0:
             await client.open_telemetry(power=True, gearing=True)
@@ -129,6 +147,11 @@ async def _run_live(options: ProbeOptions) -> int:
         if isinstance(right, pdu.SensorFirmware):
             state.ingest_sensor_firmware("right", right)
         final_status = client.status
+        if results and answered == 0:
+            exit_code = 1
+            final_status = f"error: no queries answered ({failed}/{len(results)})"
+        elif failed:
+            final_status = f"connected; {failed}/{len(results)} queries failed"
     except BikeError as exc:
         final_status = f"error: {exc}"
         print(f"probe error: {exc}", file=sys.stderr)
@@ -304,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         if options.replay:
             return asyncio.run(_run_replay(options))
         return asyncio.run(_run_live(options))
+    except CaptureFormatError as exc:
+        print(f"probe error: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
 

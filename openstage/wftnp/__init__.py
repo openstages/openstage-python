@@ -7,6 +7,22 @@ plug in through the plain data structures in :mod:`openstage.wftnp.server`.
 
 from __future__ import annotations
 
+
+class WftnpDependencyError(ImportError):
+    """The optional WFTNP dependencies are not installed."""
+
+
+try:
+    import zeroconf  # noqa: F401
+    import zeroconf.asyncio  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise WftnpDependencyError(
+        "openstage.wftnp requires zeroconf; install it with "
+        "'pip install openstage[wftnp]' or 'pip install zeroconf'"
+    ) from exc
+
+from .mdns import AdvertisementError
+
 from .elite import (
     BUTTONS,
     SERVICE,
@@ -37,9 +53,12 @@ from .server import (
     GattService,
     WriteRejected,
     WftnpServer,
+    WftnpStartError,
+    preflight_port,
 )
 
 __all__ = [
+    "AdvertisementError",
     "BUTTONS",
     "DEFAULT_MAC",
     "DEFAULT_NAME",
@@ -61,8 +80,11 @@ __all__ = [
     "SequentialGear",
     "VERSION",
     "WftnpBridge",
+    "WftnpDependencyError",
     "WftnpServer",
+    "WftnpStartError",
     "WriteRejected",
+    "preflight_port",
     "elite_button",
     "notification",
     "read_frame",

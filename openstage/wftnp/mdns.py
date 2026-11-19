@@ -7,6 +7,7 @@ service record and ties its lifetime to the server.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import socket
@@ -20,22 +21,39 @@ LOGGER = logging.getLogger(__name__)
 SERVICE_TYPE = "_wahoo-fitness-tnp._tcp.local."
 
 
-def local_ipv4() -> str:
-    """Return the address of the interface that carries the default route.
+class AdvertisementError(RuntimeError):
+    """The WFTNP endpoint cannot be advertised on this host."""
 
-    A UDP ``connect`` sends no packet, so this works offline. Loopback is only
-    a fallback for local testing; the client must reach the advertised address
-    over the LAN.
+
+def local_ipv4() -> str:
+    """Return the non-loopback LAN address used for the default route.
+
+    A UDP ``connect`` sends no packet, so this works offline. There is no
+    loopback fallback: an endpoint advertised on 127.0.0.1 is unreachable from
+    the cycling app and would look like a successful start.
     """
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        return str(sock.getsockname()[0])
-    except OSError:
-        return "127.0.0.1"
+        address = str(sock.getsockname()[0])
+    except OSError as exc:
+        raise AdvertisementError(
+            "cannot determine a LAN IPv4 address; connect to a network or pass "
+            "an explicit host"
+        ) from exc
     finally:
         sock.close()
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError as exc:
+        raise AdvertisementError(f"advertising address is not IPv4: {address!r}") from exc
+    if parsed.is_loopback or parsed.is_unspecified:
+        raise AdvertisementError(
+            f"advertising address {address} is not reachable over the LAN; "
+            "connect to a network or pass an explicit host"
+        )
+    return address
 
 
 def _dns_label(text: str) -> str:
@@ -80,13 +98,22 @@ class Advertisement:
         LOGGER.info("advertised %s on %s:%d", self.name, address, self.port)
 
     async def stop(self) -> None:
-        """Remove the record and close the responder."""
+        """Remove the record and close the responder, attempting both."""
 
         zeroconf, info = self._zeroconf, self._info
         self._zeroconf = None
         self._info = None
         if zeroconf is None:
             return
+        errors: list[str] = []
         if info is not None:
-            await zeroconf.async_unregister_service(info)
-        await zeroconf.async_close()
+            try:
+                await zeroconf.async_unregister_service(info)
+            except Exception as exc:
+                errors.append(f"unregister: {exc}")
+        try:
+            await zeroconf.async_close()
+        except Exception as exc:
+            errors.append(f"close: {exc}")
+        if errors:
+            raise AdvertisementError("; ".join(errors))

@@ -21,6 +21,7 @@ dependencies = [
   "bleak>=2.1",
   "rich>=13",
   "textual>=1.0",
+  "zeroconf>=0.13",
 ]
 
 [project.optional-dependencies]
@@ -37,9 +38,9 @@ wftnp = [
 
 [project.scripts]
 openstage-probe = "openstage.probe:main"
-openstage-tui = "openstage.tui.app:main"
+openstage-tui = "openstage.tui.entry:main"
 openstage-write = "openstage.write_cli:main"
-openstage-wftnp = "openstage.wftnp.cli:main"
+openstage-wftnp = "openstage.wftnp.entry:main"
 
 [build-system]
 requires = ["poetry-core>=2.0"]

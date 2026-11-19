@@ -35,6 +35,41 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT: Final = 36866
 
+
+class WftnpStartError(RuntimeError):
+    """The WFTNP endpoint cannot be started on this host."""
+
+
+async def _reject_connection(
+    _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    writer.close()
+    await writer.wait_closed()
+
+
+async def preflight_port(preferred: int = DEFAULT_PORT) -> int:
+    """Verify that a TCP listener can bind, returning the chosen port."""
+
+    last_error: BaseException | None = None
+    for candidate in dict.fromkeys((preferred, 0)):
+        try:
+            server = await asyncio.start_server(
+                _reject_connection, host="0.0.0.0", port=candidate
+            )
+        except OSError as exc:
+            last_error = exc
+            continue
+        try:
+            sockets = server.sockets or ()
+            return int(sockets[0].getsockname()[1])
+        finally:
+            server.close()
+            await server.wait_closed()
+    raise WftnpStartError(
+        f"cannot bind 0.0.0.0:{preferred} or an ephemeral fallback: {last_error}"
+    )
+
+
 ReadHandler = Callable[[], bytes]
 WriteHandler = Callable[[bytes], Awaitable[None]]
 SessionHandler = Callable[[], Awaitable[None]]
@@ -106,40 +141,63 @@ class WftnpServer:
         return self._writer is not None
 
     async def start(self) -> None:
-        """Bind the listener and publish the mDNS record."""
+        """Bind the listener and publish the mDNS record as one operation."""
 
-        self._server = await asyncio.start_server(
-            self._handle_client, host="0.0.0.0", port=self.port
-        )
-        sockets = self._server.sockets
-        if sockets:
-            self.port = int(sockets[0].getsockname()[1])
-        if not self.advertise:
-            return
-        # Imported here so the package works without the optional zeroconf
-        # dependency until a caller actually advertises.
         from .mdns import Advertisement
 
-        self._advertisement = Advertisement(
-            name=self.name, port=self.port, txt=self.txt, host=self.host
-        )
         try:
+            self._server = await asyncio.start_server(
+                self._handle_client, host="0.0.0.0", port=self.port
+            )
+            sockets = self._server.sockets
+            if sockets:
+                self.port = int(sockets[0].getsockname()[1])
+            if not self.advertise:
+                return
+            self._advertisement = Advertisement(
+                name=self.name, port=self.port, txt=self.txt, host=self.host
+            )
             await self._advertisement.start()
-        except Exception:
-            await self.stop()
+        except OSError:
+            await self._stop_after_failed_start()
             raise
+        except Exception as exc:
+            await self._stop_after_failed_start()
+            if isinstance(exc, WftnpStartError):
+                raise
+            raise WftnpStartError(f"cannot start the WFTNP endpoint: {exc}") from exc
+
+    async def _stop_after_failed_start(self) -> None:
+        try:
+            await self.stop()
+        except Exception:
+            LOGGER.exception("%s: cleanup after failed start", self.name)
 
     async def stop(self) -> None:
-        """Close the client, the listener and the advertisement."""
+        """Close the client, the listener and the advertisement, attempting all."""
 
-        await self._drop_client()
+        errors: list[str] = []
+        try:
+            await self._drop_client()
+        except Exception as exc:
+            errors.append(f"client: {exc}")
         if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+            try:
+                self._server.close()
+                await self._server.wait_closed()
+            except Exception as exc:
+                errors.append(f"listener: {exc}")
+            finally:
+                self._server = None
         if self._advertisement is not None:
-            await self._advertisement.stop()
-            self._advertisement = None
+            try:
+                await self._advertisement.stop()
+            except Exception as exc:
+                errors.append(f"advertisement: {exc}")
+            finally:
+                self._advertisement = None
+        if errors:
+            raise WftnpStartError("; ".join(errors))
 
     async def notify(self, characteristic_uuid: str, value: bytes) -> None:
         """Send a notification, unless the client has not enabled this one."""
@@ -192,7 +250,11 @@ class WftnpServer:
         )
         try:
             if self.on_connect is not None:
-                await self.on_connect()
+                try:
+                    await self.on_connect()
+                except Exception:
+                    LOGGER.exception("%s: on_connect failed", self.name)
+                    return
             while True:
                 await self._handle_frame(await read_frame(reader))
         except asyncio.IncompleteReadError:
@@ -206,7 +268,10 @@ class WftnpServer:
                 self._subscriptions.clear()
                 self._writer = None
                 if self.on_disconnect is not None:
-                    await self.on_disconnect()
+                    try:
+                        await self.on_disconnect()
+                    except Exception:
+                        LOGGER.exception("%s: on_disconnect failed", self.name)
             writer.close()
             try:
                 await writer.wait_closed()

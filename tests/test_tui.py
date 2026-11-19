@@ -163,7 +163,7 @@ class _TuiTransport:
 
     @property
     def service_uuids(self) -> frozenset[str]:
-        return frozenset({uuids.API_SERVICE, uuids.FITNESS_MACHINE})
+        return frozenset({uuids.API_SERVICE, uuids.BUTTON_SERVICE, uuids.FITNESS_MACHINE})
 
     async def connect(self) -> None:
         self._connected = True
@@ -261,6 +261,7 @@ def _tui_responses() -> dict[bytes, list[bytes]]:
         b"\x07\x00": [bytes.fromhex("070050")],
         b"\x0b\x01": [bytes.fromhex("0b01030405030405030404030102030400")],
         b"\x0c\x00\x02": [bytes.fromhex("0c0100010322001c000004")],
+        b"\x0c\x00\x01": [bytes.fromhex("0c0001")],
         b"\x0c\x02\x07": [bytes.fromhex("0c020800010c0f00040d00")],
         b"\x0d\x02": [bytes.fromhex("0d0280a9312e382e32")],
         b"\x0d\x04": [bytes.fromhex("0d04aeb2312e382e32")],
@@ -775,6 +776,7 @@ async def test_dashboard_serves_the_bridge_when_asked(monkeypatch: Any) -> None:
         await asyncio.sleep(0.4)
         await pilot.pause()
         assert len(started) == 1
+        assert started[0].options["name"] == "Stages Bike 0071 Square"
         assert started[0].options["standalone"] is False
         assert started[0].options["port"] == DEFAULT_PORT
     assert len(stopped) == 1

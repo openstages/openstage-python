@@ -11,11 +11,12 @@ import argparse
 import asyncio
 import logging
 import signal
+import sys
 
-from ..client import SB20Client
+from ..client import BikeError, SB20Client
 from .bridge import DEFAULT_MAC, DEFAULT_NAME, DEFAULT_SERIAL, WftnpBridge
 from .elite import SERVICE
-from .server import DEFAULT_PORT
+from .server import DEFAULT_PORT, WftnpStartError
 
 DESCRIPTION = "Run a WFTNP endpoint for a locally connected SB20."
 
@@ -66,5 +67,9 @@ def main() -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    asyncio.run(_serve(args))
+    try:
+        asyncio.run(_serve(args))
+    except (BikeError, WftnpStartError) as exc:
+        print(f"openstage-wftnp: {exc}", file=sys.stderr)
+        return 1
     return 0

@@ -10,14 +10,19 @@ from __future__ import annotations
 from .client import (
     BikeAlreadyConnectedError,
     BikeConnectionError,
+    BikeDisconnected,
     BikeError,
     BikeFeed,
     BikeIdentity,
+    BikeIncompatibleError,
     BikeNotFound,
     BikePermissionError,
     BikeProtocolError,
+    BikeRadioError,
     BikeSettings,
+    BikeSubscriptionError,
     BikeTimeout,
+    BikeTransientError,
     ControlMode,
     DrivetrainMode,
     GearPlan,
@@ -28,6 +33,7 @@ from .client import (
     Notification,
     SB20Client,
     SettingsCommit,
+    SettingsCommitError,
     StoreResult,
     WriteResult,
 )
@@ -77,6 +83,7 @@ from .pdu import (
     ensure_write_allowed,
     parse_button_action,
 )
+from .capture import CaptureFormatError
 from .replay import ReplayClient
 from .state import BikeState, DrivetrainView, Reading
 from .gearing_data import resync_drivetrain, settings_for_stored_header
@@ -84,6 +91,11 @@ from .gearing_data import resync_drivetrain, settings_for_stored_header
 __all__ = [
     "Battery",
     "BikeAlreadyConnectedError",
+    "BikeTransientError",
+    "BikeSubscriptionError",
+    "BikeRadioError",
+    "BikeIncompatibleError",
+    "BikeDisconnected",
     "ButtonAction",
     "BikeConnectionError",
     "BikeError",
@@ -97,6 +109,7 @@ __all__ = [
     "BikeStatus",
     "BikeTimeout",
     "BrakeFrame",
+    "CaptureFormatError",
     "ControlMode",
     "ButtonAssignments",
     "ButtonFrame",
@@ -129,6 +142,7 @@ __all__ = [
     "SensorFirmware",
     "SensorStatus",
     "SettingsCommit",
+    "SettingsCommitError",
     "STORE_SETTINGS_WRITE",
     "StoreResult",
     "StoreSettings",

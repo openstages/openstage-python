@@ -9,11 +9,12 @@ exact allow-list. Configuration writes use explicit builders and pass
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Literal, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from . import pdu, uuids
 from .pdu import ReadRequest, StoreSettings, StoreSettingsCommand, Stream, WriteRequest
@@ -64,8 +65,28 @@ class BikeNotFound(BikeError):
     """No SB20-shaped device was found, or the control service is absent."""
 
 
+class BikeIncompatibleError(BikeError):
+    """The connected device does not expose the required SB20 surface."""
+
+
 class BikeConnectionError(BikeError):
     """The transport is not connected or a write/read failed."""
+
+
+class BikeRadioError(BikeConnectionError):
+    """The Bluetooth adapter is unavailable, disabled or not permitted."""
+
+
+class BikeTransientError(BikeConnectionError):
+    """A connection failure that a fresh connection may recover from."""
+
+
+class BikeDisconnected(BikeTransientError):
+    """The BLE link dropped after a successful connection."""
+
+
+class BikeSubscriptionError(BikeTransientError):
+    """A required notification stream could not be enabled."""
 
 
 class BikeTimeout(BikeError):
@@ -184,6 +205,23 @@ class WriteResult:
         return self.store is not None and self.store.stored
 
 
+class SettingsCommitError(BikeError):
+    """A settings commit stopped before completing; device state is unknown."""
+
+    def __init__(
+        self,
+        step: str,
+        completed: tuple[WriteResult, ...] = (),
+        message: str | None = None,
+    ) -> None:
+        self.step = step
+        self.completed = completed
+        detail = message or f"{step} failed"
+        super().__init__(
+            f"{detail}; {len(completed)} earlier write(s) may have been applied"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SettingsCommit:
     """Result of one fluent settings commit."""
@@ -201,6 +239,41 @@ class SettingsCommit:
 
 
 _GEARING_FRAGMENT_GAP_S = 0.02
+_CLEANUP_TIMEOUT_S = 5.0
+_CONNECTIVITY_POLL_S = 1.0
+_WRITE_TIMEOUT_S = 5.0
+_LOGGER = logging.getLogger(__name__)
+
+_API_CHARACTERISTICS = frozenset({uuids.API_REQUEST, uuids.API_RESPONSE})
+_BUTTON_CHARACTERISTICS = frozenset({uuids.BUTTON_ACTIVE, uuids.BRAKE_VALUE})
+_FTMS_CHARACTERISTICS = frozenset(
+    {
+        uuids.FTMS_FEATURE,
+        uuids.FTMS_INDOOR_BIKE_DATA,
+        uuids.FTMS_STATUS,
+        uuids.FTMS_CONTROL_POINT,
+    }
+)
+_CSC_CHARACTERISTIC = uuids.CSC_MEASUREMENT
+
+
+def _is_radio_error(exc: BaseException) -> bool:
+    """Best-effort classification of BLE adapter failures."""
+
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if "devicenotfound" in name or ("device" in text and "not found" in text):
+        return False
+    markers = (
+        "adapter",
+        "not ready",
+        "notready",
+        "not authorized",
+        "permission",
+        "powered off",
+        "radio",
+    )
+    return any(marker in text for marker in markers)
 
 
 class DrivetrainMode(Enum):
@@ -547,17 +620,27 @@ class BikeSettings:
     async def commit(self, *, store: bool = False) -> SettingsCommit:
         results: list[WriteResult] = []
 
+        async def run(label: str, operation: Awaitable[Any]) -> Any:
+            try:
+                return await operation
+            except (BikeError, ValueError) as exc:
+                raise SettingsCommitError(label, tuple(results), str(exc)) from exc
+
         if self._weight is not None:
-            current_weight = await self._client.get_weight()
+            current_weight = await run("read weight", self._client.get_weight())
             user, equipment = self._weight
             if (
                 abs(user - current_weight.user_kg) > 0.005
                 or abs(equipment - current_weight.equipment_kg) > 0.005
             ):
-                results.append(await self._client.set_weight(user, equipment))
+                results.append(
+                    await run("set weight", self._client.set_weight(user, equipment))
+                )
 
         if self._brake is not None or self._dual is not None:
-            current_parameters = await self._client.get_parameters()
+            current_parameters = await run(
+                "read parameters", self._client.get_parameters()
+            )
             brake_changed = (
                 self._brake is not None
                 and current_parameters.brake_enabled != self._brake
@@ -568,28 +651,41 @@ class BikeSettings:
             )
             if brake_changed or dual_changed:
                 results.append(
-                    await self._client.set_parameters(self._brake, self._dual)
+                    await run(
+                        "set parameters",
+                        self._client.set_parameters(self._brake, self._dual),
+                    )
                 )
 
         if self._gradient is not None:
-            current_gradient = await self._client.get_gradient_scaling()
+            current_gradient = await run(
+                "read gradient scaling", self._client.get_gradient_scaling()
+            )
             factor, delay = self._gradient
             if (
                 current_gradient.factor != factor
                 or current_gradient.delay_enabled != delay
             ):
                 results.append(
-                    await self._client.set_gradient_scaling(factor, delay)
+                    await run(
+                        "set gradient scaling",
+                        self._client.set_gradient_scaling(factor, delay),
+                    )
                 )
 
         if self._crank_mm is not None:
-            current_pairing = await self._client.get_pairing()
+            current_pairing = await run(
+                "read crank pairing", self._client.get_pairing()
+            )
             if (
                 current_pairing.crank_length_mm is None
                 or abs(current_pairing.crank_length_mm - self._crank_mm) > 0.01
             ):
                 results.append(
-                    await self._client.set_crank_length(self._crank_mm)
+                    await run(
+                        "set crank length",
+                        self._client.set_crank_length(self._crank_mm),
+                    )
                 )
 
         if (
@@ -597,12 +693,17 @@ class BikeSettings:
             or self._button_actions is not None
             or self._button_changes
         ):
-            current_buttons = await self._client.get_buttons()
+            current_buttons = await run("read buttons", self._client.get_buttons())
             desired = self._desired_buttons(current_buttons.values)
             if desired != current_buttons.values:
-                results.append(await self._client.set_buttons(desired))
+                results.append(
+                    await run("set buttons", self._client.set_buttons(desired))
+                )
 
-        store_result = await self._client.store_settings() if store and results else None
+        if store and results:
+            store_result = await run("store settings", self._client.store_settings())
+        else:
+            store_result = None
         self._weight = None
         self._brake = None
         self._dual = None
@@ -661,6 +762,7 @@ class SB20Client:
         subscribe_csc: bool = True,
     ) -> None:
         self._transport = transport
+        self._owns_transport = transport is None
         self._address = address
         self._name_filter = name_filter
         self._scan_timeout = scan_timeout
@@ -687,6 +789,10 @@ class SB20Client:
         self._request_lock = asyncio.Lock()
         self._telemetry: set[str] = set()
         self._closed = False
+        self._closing = False
+        self._disconnect_reason: BikeDisconnected | None = None
+        self._csc_available = True
+        self._cleanup_errors: tuple[str, ...] = ()
 
     # ------------------------------------------------------------------ properties
 
@@ -714,39 +820,85 @@ class SB20Client:
     def transport(self) -> Transport | None:
         return self._transport
 
+    @property
+    def csc_available(self) -> bool:
+        return self._csc_available
+
+    @property
+    def cleanup_errors(self) -> tuple[str, ...]:
+        return self._cleanup_errors
+
     # ------------------------------------------------------------------ lifecycle
 
     async def connect(self) -> None:
-        """Discover (if needed), connect, verify the control service and subscribe."""
+        """Discover (if needed), connect, verify the required GATT surface and subscribe."""
 
         if self._closed:
             raise BikeConnectionError("client is closed; create a new SB20Client")
-        if self._transport is not None and self._transport.is_connected:
+        if (
+            self._transport is not None
+            and self._transport.is_connected
+            and self._disconnect_reason is None
+        ):
             return
+
+        self._disconnect_reason = None
+        self._csc_available = True
+        self._cleanup_errors = ()
+        self._queue = asyncio.Queue()
+        self._started.clear()
+        self._telemetry.clear()
+
+        if self._owns_transport:
+            self._transport = None
 
         if self._transport is None:
             address = self._address
             name: str | None = None
             if address is None:
-                self._status = f"scanning for a Stages bike ({self._scan_timeout:.0f}s per attempt; retrying)…"
-                candidates = await discover_bikes(self._scan_timeout, self._name_filter)
+                self._status = (
+                    f"scanning for a Stages bike "
+                    f"({self._scan_timeout:.0f}s per attempt; retrying)…"
+                )
+                try:
+                    candidates = await discover_bikes(self._scan_timeout, self._name_filter)
+                except Exception as exc:
+                    self._status = "Bluetooth scan failed"
+                    raise BikeRadioError(f"Bluetooth scan failed: {exc}") from exc
                 chosen: BikeAdvertisement = candidates[0]
                 address = chosen.address
                 name = chosen.name
+                self._address = address
                 self._note(f"selected {name!r} ({address})")
-            self._transport = BleakTransport(address)
-            self._identity = replace(self._identity, address=address, name=name or self._identity.name)
+            try:
+                self._transport = BleakTransport(
+                    address,
+                    disconnected_callback=self._on_transport_disconnect,
+                )
+            except Exception as exc:
+                self._status = "connection failed"
+                raise BikeConnectionError(
+                    f"cannot create BLE client for {address}: {exc}"
+                ) from exc
+            self._identity = replace(
+                self._identity, address=address, name=name or self._identity.name
+            )
+        else:
+            setter = getattr(self._transport, "set_disconnected_callback", None)
+            if setter is not None:
+                setter(self._on_transport_disconnect)
 
         self._status = f"connecting to {self._identity.address or 'device'}…"
         try:
             await self._transport.connect()
         except Exception as exc:
             self._status = "connection failed"
-            raise BikeConnectionError(f"connect failed: {exc}") from exc
+            if _is_radio_error(exc):
+                raise BikeRadioError(f"Bluetooth connection failed: {exc}") from exc
+            raise BikeTransientError(f"connect failed: {exc}") from exc
 
         try:
-            if uuids.normalize(uuids.API_SERVICE) not in self._transport.service_uuids:
-                raise BikeNotFound("connected device has no SB20 control service")
+            self._verify_surface()
             self._mtu = self._transport.mtu_size
             await self._read_identity()
             await self._start_notifications()
@@ -757,37 +909,82 @@ class SB20Client:
         self._status = f"connected to {self._identity.name or self._identity.address or 'SB20'}"
         self._note(f"connected; MTU {self._mtu if self._mtu is not None else 'unknown'}")
 
+    def _verify_surface(self) -> None:
+        """Reject a device that does not expose the required SB20 GATT surface."""
+
+        transport = self._transport
+        assert transport is not None
+        services = {uuids.normalize(value) for value in transport.service_uuids}
+        missing: list[str] = []
+        if uuids.normalize(uuids.API_SERVICE) not in services:
+            missing.append(uuids.API_SERVICE)
+        if self._subscribe_buttons and uuids.normalize(uuids.BUTTON_SERVICE) not in services:
+            missing.append(uuids.BUTTON_SERVICE)
+        if self._subscribe_ftms and uuids.normalize(uuids.FITNESS_MACHINE) not in services:
+            missing.append(uuids.FITNESS_MACHINE)
+
+        characteristics = getattr(transport, "characteristic_uuids", None)
+        if characteristics is not None:
+            available = {uuids.normalize(value) for value in characteristics}
+            required = set(_API_CHARACTERISTICS)
+            if self._subscribe_buttons:
+                required.update(_BUTTON_CHARACTERISTICS)
+            if self._subscribe_ftms:
+                required.update(_FTMS_CHARACTERISTICS)
+            missing.extend(
+                value for value in sorted(required) if uuids.normalize(value) not in available
+            )
+
+        if missing:
+            names = ", ".join(sorted(set(missing)))
+            raise BikeIncompatibleError(
+                f"connected device is missing required services/characteristics: {names}"
+            )
+
+        if self._subscribe_csc:
+            service_present = (
+                uuids.normalize(uuids.CYCLING_SPEED_AND_CADENCE) in services
+            )
+            characteristic_present = (
+                characteristics is None
+                or uuids.normalize(_CSC_CHARACTERISTIC)
+                in {uuids.normalize(value) for value in characteristics}
+            )
+            if not service_present or not characteristic_present:
+                self._csc_available = False
+                self._note("CSC unavailable; cadence falls back to API/FTMS")
+
     async def close(self) -> None:
         """Close telemetry, notifications and the transport.  Safe to call twice."""
 
         if self._closed:
             return
-        self._closed = True
+        self._closing = True
         if self._store_waiter is not None and not self._store_waiter.future.done():
             self._store_waiter.future.cancel()
         self._store_waiter = None
         if self._gear_store_waiter is not None and not self._gear_store_waiter.future.done():
             self._gear_store_waiter.future.cancel()
         self._gear_store_waiter = None
+        self._disconnect_reason = None
+        errors: list[str] = []
         try:
-            await asyncio.wait_for(self.close_telemetry(), timeout=2.0)
-        except (TimeoutError, BikeError):
-            pass
-        transport = self._transport
-        if transport is not None:
-            for uuid in list(self._started.values()):
+            if self._telemetry:
                 try:
-                    await transport.stop_notify(uuid)
-                except Exception:
-                    pass
+                    await asyncio.wait_for(self.close_telemetry(), timeout=2.0)
+                except Exception as exc:
+                    errors.append(f"telemetry: {exc}")
+            errors.extend(await self._release_transport())
+        finally:
+            self._telemetry.clear()
             self._started.clear()
-            if transport.is_connected:
-                try:
-                    await transport.disconnect()
-                except Exception:
-                    pass
-        self._status = "disconnected"
-        self._queue.put_nowait(None)
+            self._status = "disconnected"
+            self._queue.put_nowait(None)
+            self._closed = True
+            self._closing = False
+            self._cleanup_errors = tuple(errors)
+            for error in errors:
+                _LOGGER.debug("cleanup: %s", error)
 
     async def __aenter__(self) -> SB20Client:
         await self.connect()
@@ -796,22 +993,71 @@ class SB20Client:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         await self.close()
 
-    async def _disconnect_best_effort(self) -> None:
+    async def _release_transport(self) -> list[str]:
+        """Stop every started stream and disconnect, attempting every step."""
+
+        errors: list[str] = []
         transport = self._transport
         if transport is None:
-            return
-        for uuid in list(self._started.values()):
+            return errors
+        for stream, uuid in list(self._started.items()):
             try:
-                await transport.stop_notify(uuid)
-            except Exception:
-                pass
+                await asyncio.wait_for(
+                    transport.stop_notify(uuid), timeout=_CLEANUP_TIMEOUT_S
+                )
+            except Exception as exc:
+                errors.append(f"stop {stream.value} notifications: {exc}")
         self._started.clear()
         try:
-            await transport.disconnect()
-        except Exception:
-            pass
-        self._transport = None
-        self._status = "not connected"
+            if transport.is_connected:
+                await asyncio.wait_for(
+                    transport.disconnect(), timeout=_CLEANUP_TIMEOUT_S
+                )
+        except Exception as exc:
+            errors.append(f"disconnect: {exc}")
+        if self._owns_transport:
+            self._transport = None
+        return errors
+
+    async def _disconnect_best_effort(self) -> None:
+        self._closing = True
+        errors: list[str] = []
+        try:
+            errors = await self._release_transport()
+        finally:
+            self._telemetry.clear()
+            self._started.clear()
+            self._status = "not connected"
+            self._closing = False
+            for error in errors:
+                _LOGGER.debug("connect cleanup: %s", error)
+
+    def _on_transport_disconnect(self) -> None:
+        """Wake every waiter when the BLE link drops.
+
+        This is idempotent for status and error reporting, but it always
+        clears the live subscription set and wakes the notification consumer.
+        A repeated callback must not be ignored just because an earlier one
+        already set ``_disconnect_reason``.
+        """
+
+        if self._closed or self._closing:
+            return
+        reason = self._disconnect_reason
+        if reason is None:
+            reason = BikeDisconnected("BLE link dropped")
+            self._disconnect_reason = reason
+            self._status = "disconnected"
+            self._note("BLE link dropped")
+        pending = self._pending
+        if pending is not None and not pending.future.done():
+            pending.future.set_exception(reason)
+        for waiter in (self._store_waiter, self._gear_store_waiter):
+            if waiter is not None and not waiter.future.done():
+                waiter.future.set_exception(BikeDisconnected("BLE link dropped"))
+        self._started.clear()
+        self._telemetry.clear()
+        self._queue.put_nowait(None)
 
     async def _read_identity(self) -> None:
         assert self._transport is not None
@@ -836,12 +1082,12 @@ class SB20Client:
         assert self._transport is not None
         streams: list[tuple[Stream, str, bool]] = [(Stream.API, uuids.API_RESPONSE, True)]
         if self._subscribe_buttons:
-            streams.append((Stream.BUTTONS, uuids.BUTTON_ACTIVE, False))
-            streams.append((Stream.BRAKE, uuids.BRAKE_VALUE, False))
+            streams.append((Stream.BUTTONS, uuids.BUTTON_ACTIVE, True))
+            streams.append((Stream.BRAKE, uuids.BRAKE_VALUE, True))
         if self._subscribe_ftms:
-            streams.append((Stream.FTMS_DATA, uuids.FTMS_INDOOR_BIKE_DATA, False))
-            streams.append((Stream.FTMS_STATUS, uuids.FTMS_STATUS, False))
-            streams.append((Stream.FTMS_CONTROL, uuids.FTMS_CONTROL_POINT, False))
+            streams.append((Stream.FTMS_DATA, uuids.FTMS_INDOOR_BIKE_DATA, True))
+            streams.append((Stream.FTMS_STATUS, uuids.FTMS_STATUS, True))
+            streams.append((Stream.FTMS_CONTROL, uuids.FTMS_CONTROL_POINT, True))
         if self._subscribe_csc:
             streams.append((Stream.CSC, uuids.CSC_MEASUREMENT, False))
 
@@ -850,9 +1096,10 @@ class SB20Client:
                 await self._transport.start_notify(uuid, self._callback(stream))
             except Exception as exc:
                 if required:
-                    raise BikeConnectionError(
+                    raise BikeSubscriptionError(
                         f"cannot enable {stream.value} notifications: {exc}"
                     ) from exc
+                self._csc_available = False
                 self._note(f"{stream.value} notifications unavailable: {exc}")
                 continue
             self._started[stream] = uuid
@@ -876,11 +1123,28 @@ class SB20Client:
             pass
 
     async def notifications(self) -> AsyncGenerator[Notification, None]:
-        """Yield every decoded notification until :meth:`close`."""
+        """Yield notifications until :meth:`close` or a link drop.
+
+        A dropped link raises :class:`BikeDisconnected` so the consumer can
+        decide whether to reconnect.
+        """
 
         while True:
-            item = await self._queue.get()
+            try:
+                item = await asyncio.wait_for(
+                    self._queue.get(), timeout=_CONNECTIVITY_POLL_S
+                )
+            except TimeoutError:
+                transport = self._transport
+                if transport is not None and not transport.is_connected:
+                    # Some backends miss the disconnect callback. Polling the
+                    # link makes the recovery path independent of that event.
+                    self._on_transport_disconnect()
+                continue
             if item is None:
+                reason, self._disconnect_reason = self._disconnect_reason, None
+                if reason is not None:
+                    raise reason
                 return
             yield item
 
@@ -1074,8 +1338,11 @@ class SB20Client:
             raise BikeConnectionError("not connected")
         async with self._request_lock:
             try:
-                await transport.write_characteristic(
-                    uuids.FTMS_CONTROL_POINT, bytes(value)
+                await asyncio.wait_for(
+                    transport.write_characteristic(
+                        uuids.FTMS_CONTROL_POINT, bytes(value)
+                    ),
+                    timeout=_WRITE_TIMEOUT_S,
                 )
             except Exception as exc:
                 raise BikeConnectionError(f"write failed: {exc}") from exc
@@ -1235,7 +1502,10 @@ class SB20Client:
         if transport is None or not transport.is_connected:
             raise BikeConnectionError("not connected")
         try:
-            await transport.write_characteristic(uuids.API_REQUEST, data)
+            await asyncio.wait_for(
+                transport.write_characteristic(uuids.API_REQUEST, data),
+                timeout=_WRITE_TIMEOUT_S,
+            )
         except Exception as exc:
             raise BikeConnectionError(f"write failed: {exc}") from exc
 
@@ -1276,7 +1546,13 @@ class SB20Client:
         store: bool = False,
     ) -> WriteResult:
         response = self._expect(await self.write_request(request), expected, label)
-        store_result = await self.store_settings() if store else None
+        if not store:
+            return WriteResult(set_response=response)
+        completed = (WriteResult(set_response=response),)
+        try:
+            store_result = await self.store_settings()
+        except BikeError as exc:
+            raise SettingsCommitError("store settings", completed, str(exc)) from exc
         return WriteResult(set_response=response, store=store_result)
 
     @staticmethod
@@ -1572,12 +1848,12 @@ class SB20Client:
         self._telemetry.discard("gearing")
 
     async def open_telemetry(self, *, power: bool = True, gearing: bool = True) -> None:
-        if power:
+        if power and "power" not in self._telemetry:
             try:
                 await self.subscribe_power_data()
             except BikeError as exc:
                 self._note(f"power subscription failed: {exc}")
-        if gearing:
+        if gearing and "gearing" not in self._telemetry:
             try:
                 await self.subscribe_gearing()
             except BikeError as exc:

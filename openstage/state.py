@@ -180,6 +180,7 @@ class BikeState:
     identity: BikeIdentity = field(default_factory=BikeIdentity)
     mtu: int | None = None
     status: str = ""
+    csc_available: bool = True
 
     # rider metrics, kept per stream and resolved through SourcePreferences
     power: Metric[int] = field(default_factory=_metric)
@@ -481,6 +482,7 @@ class BikeState:
             "identity": self.identity.as_dict(),
             "mtu": self.mtu,
             "status": self.status,
+            "csc_available": self.csc_available,
             "power_w": reading(self.power_w),
             "cadence_rpm": reading(self.cadence_rpm),
             "balance_pct": reading(self.balance_pct),

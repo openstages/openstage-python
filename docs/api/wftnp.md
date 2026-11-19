@@ -5,11 +5,15 @@ Wahoo Fitness TNP tunnel: mDNS discovery plus a TCP connection that carries BLE
 GATT operations. The bike stays on Bluetooth; the application sees a device it
 can discover, read and control.
 
-The package is optional. Install it with the extra:
+The WFTNP endpoint is included in the base install; `zeroconf` is a base
+dependency. The `wftnp` extra remains as a compatibility alias:
 
 ```sh
 pip install 'openstage[wftnp]'
 ```
+
+`import openstage.wftnp` verifies `zeroconf` immediately and fails with an
+install hint if it is missing.
 
 ## Run a bridge
 

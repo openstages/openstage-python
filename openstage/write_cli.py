@@ -12,11 +12,25 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Awaitable
 from typing import Any
 
 from . import pdu
 from .cli import add_connection_arguments
-from .client import BikeError, SB20Client, StoreResult, WriteResult
+from .client import (
+    BikeError,
+    SB20Client,
+    SettingsCommitError,
+    StoreResult,
+    WriteResult,
+)
+
+
+async def _safe_read(operation: Awaitable[Any]) -> Any:
+    try:
+        return await operation
+    except BikeError as exc:
+        return exc
 
 
 def _pdu(value: pdu.Pdu) -> dict[str, str]:
@@ -183,9 +197,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                          else args.equipment_kg)
             weight_result = await client.set_weight(user, equipment, store=args.store)
             out["write"] = _write(weight_result)
-            weight_readback = await client.get_weight()
-            out["readback"] = {"user_kg": weight_readback.user_kg,
-                               "equipment_kg": weight_readback.equipment_kg}
+            weight_readback = await _safe_read(client.get_weight())
+            if isinstance(weight_readback, Exception):
+                out["readback"] = {"error": str(weight_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = {"user_kg": weight_readback.user_kg,
+                                   "equipment_kg": weight_readback.equipment_kg}
         elif args.command == "parameters":
             current_parameters = await client.get_parameters()
             out["baseline"] = {"brake_raw": current_parameters.brake_raw,
@@ -194,9 +212,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             dual = _parse_tristate(args.dual) if args.dual else None
             parameters_result = await client.set_parameters(brake, dual, store=args.store)
             out["write"] = _write(parameters_result)
-            parameters_readback = await client.get_parameters()
-            out["readback"] = {"brake_raw": parameters_readback.brake_raw,
-                               "dual_ble_raw": parameters_readback.dual_ble_raw}
+            parameters_readback = await _safe_read(client.get_parameters())
+            if isinstance(parameters_readback, Exception):
+                out["readback"] = {"error": str(parameters_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = {"brake_raw": parameters_readback.brake_raw,
+                                   "dual_ble_raw": parameters_readback.dual_ble_raw}
         elif args.command == "gradient":
             current_gradient = await client.get_gradient_scaling()
             out["baseline"] = {"factor": current_gradient.factor,
@@ -207,10 +229,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 factor, args.delay, store=args.store
             )
             out["write"] = _write(gradient_result)
-            gradient_readback = await client.get_gradient_scaling()
-            out["readback"] = {"factor": gradient_readback.factor,
-                               "percent": gradient_readback.percent,
-                               "delay_enabled": gradient_readback.delay_enabled}
+            gradient_readback = await _safe_read(client.get_gradient_scaling())
+            if isinstance(gradient_readback, Exception):
+                out["readback"] = {"error": str(gradient_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = {"factor": gradient_readback.factor,
+                                   "percent": gradient_readback.percent,
+                                   "delay_enabled": gradient_readback.delay_enabled}
         elif args.command == "resistance":
             current_resistance = await client.get_resistance()
             out["baseline"] = {"level": current_resistance.level,
@@ -220,16 +246,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             percent = args.percent if args.level is None else level / 2.55
             resistance_result = await client.set_target_resistance(percent)
             out["write"] = _write(resistance_result)
-            resistance_readback = await client.get_resistance()
-            out["readback"] = {"level": resistance_readback.level,
-                               "percent": resistance_readback.percent}
+            resistance_readback = await _safe_read(client.get_resistance())
+            if isinstance(resistance_readback, Exception):
+                out["readback"] = {"error": str(resistance_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = {"level": resistance_readback.level,
+                                   "percent": resistance_readback.percent}
         elif args.command == "crank-length":
             current_pairing = await client.get_pairing()
             out["baseline"] = _pdu(current_pairing)
             crank_result = await client.set_crank_length(args.mm, store=args.store)
             out["write"] = _write(crank_result)
-            crank_readback = await client.get_pairing()
-            out["readback"] = _pdu(crank_readback)
+            crank_readback = await _safe_read(client.get_pairing())
+            if isinstance(crank_readback, Exception):
+                out["readback"] = {"error": str(crank_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = _pdu(crank_readback)
         elif args.command == "zero-reset":
             zero = await client.zero_reset()
             out["write"] = {"zero_reset": _pdu(zero)}
@@ -272,14 +306,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 changes = _parse_assignments(args.assign)
                 buttons_result = await client.set_button_slots(changes, store=args.store)
             out["write"] = _write(buttons_result)
-            buttons_readback = await client.get_buttons()
-            out["readback"] = {
-                "wire": list(buttons_readback.values),
-                "actions": [
-                    None if action is None else action.name
-                    for action in pdu.button_actions_from_wire(buttons_readback.values)
-                ],
-            }
+            buttons_readback = await _safe_read(client.get_buttons())
+            if isinstance(buttons_readback, Exception):
+                out["readback"] = {"error": str(buttons_readback)}
+                out["state"] = "unknown: the write may have been applied"
+            else:
+                out["readback"] = {
+                    "wire": list(buttons_readback.values),
+                    "actions": [
+                        None if action is None else action.name
+                        for action in pdu.button_actions_from_wire(
+                            buttons_readback.values
+                        )
+                    ],
+                }
         else:  # store
             store_result = await client.store_settings()
             out["write"] = {"store": _store(store_result)}
@@ -317,8 +357,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         out = asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        return 130
+    except SettingsCommitError as exc:
+        print(f"write failed at {exc.step}: {exc}", file=sys.stderr)
+        print("device state is unknown; verify it before retrying", file=sys.stderr)
+        return 1
     except (BikeError, ValueError) as exc:
         print(f"write failed: {exc}", file=sys.stderr)
+        return 1
+    readback = out.get("readback")
+    if isinstance(readback, dict) and "error" in readback:
+        if args.as_json:
+            print(json.dumps(out, indent=1, sort_keys=True))
+        else:
+            _print_human(out)
+        print(f"readback failed: {readback['error']}", file=sys.stderr)
+        print(f"state: {out.get('state', 'unknown')}", file=sys.stderr)
         return 1
     if args.as_json:
         print(json.dumps(out, indent=1, sort_keys=True))
